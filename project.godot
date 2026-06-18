@@ -1,0 +1,15 @@
+; Engine configuration file.
+; Minimal project so the addons here can be opened/edited/tested in isolation in
+; the Godot editor. The addons are consumed by copying addons/<name>/ into another
+; project; this project is the distribution source of truth.
+
+config_version=5
+
+[application]
+
+config/name="godot-addons"
+config/features=PackedStringArray("4.6")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/ui_kit/plugin.cfg")

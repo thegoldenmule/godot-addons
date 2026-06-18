@@ -1,0 +1,10 @@
+# Godot
+.godot/
+*.import
+export_presets.cfg
+
+# OS
+.DS_Store
+
+# Self-update staging (only ever written into a consuming project's user://)
+ui_kit_update/
