@@ -12,4 +12,4 @@ config/features=PackedStringArray("4.6")
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/editor_tool_kit/plugin.cfg", "res://addons/ui_kit/plugin.cfg")
+enabled=PackedStringArray("res://addons/editor_tool_kit/plugin.cfg", "res://addons/remote_config_editor/plugin.cfg", "res://addons/ui_kit/plugin.cfg")

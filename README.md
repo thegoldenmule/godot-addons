@@ -14,6 +14,7 @@ and tested in isolation.
 |---|---|
 | [`ui_kit`](addons/ui_kit/README.md) | Generic UI shell infrastructure: an async stack-FSM router (`UiRouter`), `UiState`, `UiScreenScaffold`, control registration (`UiReg`), and a semantic UI/navigation automation driver (`UiDriver`). |
 | [`editor_tool_kit`](addons/editor_tool_kit/README.md) | Editor-only base classes for in-editor authoring tools (`EditorToolPlugin`, `ToolService`, `ContentStore`, `EditorToolUi`, `BridgeServer`): a new tool is a *service + a view*, with the occult-arcade styling, persistence, and optional MCP/CLI access inherited from the bases. |
+| [`remote_config_editor`](addons/remote_config_editor/README.md) | Editor-only authoring tool that aggregates committed content blobs (per a project-supplied manifest) into one backend "remote config" document, copies the full publish payload, and optionally checks live drift. Game-agnostic; configured per project via `res://remote_config_editor.config.json`. |
 
 ## Using an addon
 

@@ -17,7 +17,8 @@ project.godot         minimal; [editor_plugins] enables every addon here
 wiki/                 EMITTED docs (Hotseat workspace -> markdown). Never hand-edit; see below.
 ```
 
-Currently: `ui_kit` (UI shell infra) and `editor_tool_kit` (editor-tool base classes).
+Currently: `ui_kit` (UI shell infra), `editor_tool_kit` (editor-tool base classes),
+and `remote_config_editor` (manifest-driven remote-config aggregation/publish).
 
 ## The vendoring + self-update model
 
@@ -38,9 +39,10 @@ and touches nothing else in the consuming project. (See
 `addons/editor_tool_kit/update_*.gd` + `package_registry.gd`.)
 
 > **DEPENDENCY:** a managed addon's self-update now requires `editor_tool_kit` to
-> be vendored + enabled alongside it. (ui_kit's only consumer, `../moveborne-godot`,
-> already vendors both; `../war` vendors only etk.) The two addons still copy as
-> self-contained folders — the dependency is "etk must also be present," not "etk
+> be vendored + enabled alongside it — true for both `ui_kit` and
+> `remote_config_editor`. (`../moveborne-godot` vendors all three — ui_kit, etk, and
+> remote_config_editor; `../war` vendors only etk.) Each addon still copies as a
+> self-contained folder — the dependency is "etk must also be present," not "etk
 > files live inside the other addon."
 
 > **LOAD-BEARING:** an addon must live at exactly `addons/<name>/` at the repo root,
