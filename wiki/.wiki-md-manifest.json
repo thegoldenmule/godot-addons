@@ -1,6 +1,6 @@
 {
   "ws:mql353ht-01pe-yb8909": {
-    "version": 463,
+    "version": 595,
     "files": {
       "godot-addons/editor-tool-kit/index.md": "6f3160bb7496bbf110a51a4ccd7cf9c5025fd3cd550f875952cbdadc3b566cef",
       "godot-addons/ui-kit/index.md": "9c2ca18b9a8d4c42faec03e147e0afcee6c5672db0d8f10fff1d9054bedd6dcc",
@@ -43,7 +43,20 @@
       "godot-addons/ui-kit/adrs/actionable-controls-self-register-via-uireg-as-a-byproduct-of-construction.md": "dfa9121cc22c04ca6c7e70df902ff1398036a3fcb9585098b71c6330d5422ba7",
       "godot-addons/ui-kit/adrs/uidriver-knows-no-game-specifics-the-game-supplies-a-ui-nav-host.md": "599583f9f08546cfc1219acf3ff98ac9180e7d24d050be8372e786cf36085a3b",
       "godot-addons/ui-kit/adrs/the-addon-registers-no-autoloads-the-consuming-project-declares-them.md": "4ca652a9c3b5e19d64be69a5f98200144ab49f5d59c549f9d1eb3be0ed97e848",
-      "godot-addons/editor-tool-kit/adrs/adr-9-editor-tool-kit-is-the-package-manager-addons-opt-in-via-an-update-marker-and-ship-no-update-machinery.md": "866cb1b8b7d109f3de1fc7d5646904c70c2b978b2ea2b021aeaf1623ad9a6883"
+      "godot-addons/editor-tool-kit/adrs/adr-9-editor-tool-kit-is-the-package-manager-addons-opt-in-via-an-update-marker-and-ship-no-update-machinery.md": "866cb1b8b7d109f3de1fc7d5646904c70c2b978b2ea2b021aeaf1623ad9a6883",
+      "godot-addons/remote-config-editor/index.md": "fac1928528daae84f3816bdd0cf4ff6b33ea5dfa1d8d93dc7b7fadff1c209a7f",
+      "godot-addons/remote-config-editor/architecture/index.md": "be7bddaac301e0c9c5af48613a5040eeb4e11c6d6b375313c27f49bece637842",
+      "godot-addons/remote-config-editor/usage/index.md": "591ba25a2faadbb6e745775ec73d8c1b4b366b1a92c423bd3f5cb02caa84d1a2",
+      "godot-addons/remote-config-editor/adrs/index.md": "65f343dc2b95c657aad6586ec62c5c11c91a745872d493e0f17aad532c1ef91b",
+      "godot-addons/remote-config-editor/architecture/remote-config-editor/index.md": "3c3c713f40a0334130fdec339ff789b2a86fde1cfce315f5daeba9db6ace5cdc",
+      "godot-addons/remote-config-editor/usage/getting-started-install-enable-configure.md": "0dd4fe56c12863625e187c70c50dd5b748533bde213d7926b20fe27a237b96ce",
+      "godot-addons/remote-config-editor/usage/publishing-checking-drift.md": "7aee7f8dca08695f65294efda4d637c8b324ba26104e5241ff2e7e1d2c2f36bb",
+      "godot-addons/remote-config-editor/adrs/project-specific-config-lives-outside-the-addon-folder-in-res-remote-config-editor-config-json.md": "c1be4b636042d4c427621b8f033704877d08fdb214c4021f3d692d231b0e8118",
+      "godot-addons/remote-config-editor/adrs/the-publish-payload-splices-each-blob-s-raw-on-disk-json-verbatim-preserving-numeric-fidelity.md": "2710f48a494aef2d21e43308c4072d9e568fd3b7a79c47c5d65a7dd9b668e27d",
+      "godot-addons/remote-config-editor/adrs/drift-check-shells-out-to-one-project-supplied-comparator-never-reimplemented-in-gdscript.md": "20e6f4579ce9492165fdbd798ff65cf8226d75cde824cc284f55fc3915347bb4",
+      "godot-addons/remote-config-editor/architecture/remote-config-editor/remoteconfigservice.md": "05955dcba21537c6f1a7ed68dd2791f594d320484581479fe9cb757a222fa645",
+      "godot-addons/remote-config-editor/architecture/remote-config-editor/remoteconfig-dock.md": "b685b26677d6ff90217e265dfd709144d76d811c17ec15c372f8e5cd4acb7457",
+      "godot-addons/remote-config-editor/architecture/remote-config-editor/configuration-path-resolution.md": "b26b9bd2d3b08d18c22fd5302665aa5d0bd7d83086258ab282b52fc2a2921ca2"
     },
     "pages": {
       "toc:mql36lau-01pg-x14tg2": "godot-addons/editor-tool-kit/index.md",
@@ -87,7 +100,20 @@
       "decision-record:mql3e08u-01yw-pilmta": "godot-addons/ui-kit/adrs/actionable-controls-self-register-via-uireg-as-a-byproduct-of-construction.md",
       "decision-record:mql3ekiw-022k-5w2vgf": "godot-addons/ui-kit/adrs/uidriver-knows-no-game-specifics-the-game-supplies-a-ui-nav-host.md",
       "decision-record:mql3f6gt-0246-gvd39o": "godot-addons/ui-kit/adrs/the-addon-registers-no-autoloads-the-consuming-project-declares-them.md",
-      "decision-record:mql6tar6-02c0-zgxeyx": "godot-addons/editor-tool-kit/adrs/adr-9-editor-tool-kit-is-the-package-manager-addons-opt-in-via-an-update-marker-and-ship-no-update-machinery.md"
+      "decision-record:mql6tar6-02c0-zgxeyx": "godot-addons/editor-tool-kit/adrs/adr-9-editor-tool-kit-is-the-package-manager-addons-opt-in-via-an-update-marker-and-ship-no-update-machinery.md",
+      "toc:mql8otch-02f8-h73asj": "godot-addons/remote-config-editor/index.md",
+      "toc:mql8oyb1-02fa-i0072g": "godot-addons/remote-config-editor/architecture/index.md",
+      "toc:mql8ozkp-02fc-h1qy2g": "godot-addons/remote-config-editor/usage/index.md",
+      "toc:mql8p1ms-02fe-dio3rw": "godot-addons/remote-config-editor/adrs/index.md",
+      "architecture:mql8pmvd-02fg-pqih2o": "godot-addons/remote-config-editor/architecture/remote-config-editor/index.md",
+      "document:mql8po2v-02fi-qhvh6m": "godot-addons/remote-config-editor/usage/getting-started-install-enable-configure.md",
+      "document:mql8pr08-02fk-28x44": "godot-addons/remote-config-editor/usage/publishing-checking-drift.md",
+      "decision-record:mql8psw7-02fm-3m42ke": "godot-addons/remote-config-editor/adrs/project-specific-config-lives-outside-the-addon-folder-in-res-remote-config-editor-config-json.md",
+      "decision-record:mql8pu6g-02fo-u6g62c": "godot-addons/remote-config-editor/adrs/the-publish-payload-splices-each-blob-s-raw-on-disk-json-verbatim-preserving-numeric-fidelity.md",
+      "decision-record:mql8pvhe-02fq-gvm621": "godot-addons/remote-config-editor/adrs/drift-check-shells-out-to-one-project-supplied-comparator-never-reimplemented-in-gdscript.md",
+      "architecture:mql8q3t4-02fs-vycbv8": "godot-addons/remote-config-editor/architecture/remote-config-editor/remoteconfigservice.md",
+      "architecture:mql8q586-02fu-h64en9": "godot-addons/remote-config-editor/architecture/remote-config-editor/remoteconfig-dock.md",
+      "architecture:mql8q6ta-02fw-hmsrub": "godot-addons/remote-config-editor/architecture/remote-config-editor/configuration-path-resolution.md"
     }
   }
 }
