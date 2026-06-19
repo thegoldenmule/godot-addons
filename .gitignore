@@ -6,5 +6,7 @@ export_presets.cfg
 # OS
 .DS_Store
 
-# Self-update staging (only ever written into a consuming project's user://)
+# Self-update staging (only ever written into a consuming project's user://).
+# One per self-updating addon — add a line when you add an addon.
 ui_kit_update/
+editor_tool_kit_update/
