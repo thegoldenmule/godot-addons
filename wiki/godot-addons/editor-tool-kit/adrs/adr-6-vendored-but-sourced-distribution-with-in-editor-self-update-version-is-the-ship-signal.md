@@ -22,5 +22,7 @@ Each consumer holds a copy that can fall behind; updating is a per-consumer acti
 
 Local edits to a consumer's vendored copy are not the source of truth and are clobbered on update (see the extract-safety ADR).
 
+Superseded in part by ADR-9: the per-addon self-update dock is replaced by the editor_tool_kit package manager, which an addon opts into with an [update] marker in its plugin.cfg. The vendored-but-sourced model and version-is-the-ship-signal decided here are unchanged.
+
 ## Relations
 _None._

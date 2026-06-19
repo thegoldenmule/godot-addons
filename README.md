@@ -19,13 +19,16 @@ and tested in isolation.
 
 Copy `addons/<name>/` into your project's `addons/`, enable it in
 Project → Project Settings → Plugins, and follow that addon's README for any
-autoload / wiring it needs. The addon's bottom-panel dock checks this repo for
-newer versions and pulls them in place.
+autoload / wiring it needs. Updates are managed by **`editor_tool_kit`**, which
+acts as the package manager: its "Editor Tool Kit" bottom-panel dock lists every
+managed addon (any addon carrying an `[update]` marker, including etk itself),
+checks this repo for newer versions, and pulls them in place — one UI for all
+addons. A managed addon therefore needs `editor_tool_kit` vendored alongside it.
 
 ## Adding an addon
 
 This repo is the home for extracted, game-agnostic addons. To add one, drop it at
-`addons/<name>/` (sibling to the others — the self-update extractor requires that
-exact path), wire it up, and ship by bumping its `plugin.cfg` `version` on `main`.
-See [`CLAUDE.md`](CLAUDE.md) for the full new-addon checklist and the self-update
-constant contract every addon must satisfy to source from this repo.
+`addons/<name>/` (sibling to the others — the extractor requires that exact path),
+wire it up, add an `[update]` marker to its `plugin.cfg` to make it self-update,
+and ship by bumping that `version` on `main`. See [`CLAUDE.md`](CLAUDE.md) for the
+full new-addon checklist and the self-update marker contract.

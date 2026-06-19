@@ -1,34 +1,32 @@
 @tool
 extends Node
 
-## Self-update install runner for editor_tool_kit. Adapted from godot-ai's
-## update_reload_runner: a Node parented OUTSIDE the plugin (so it survives
-## set_plugin_enabled(false)) that owns the install-and-reload sequence —
-## disable the plugin, extract the addon subtree from the downloaded repo
-## archive, wait for a filesystem scan, then re-enable the plugin so the editor
-## reloads the new scripts.
+## Self-update install runner for the editor_tool_kit package manager. Adapted
+## from godot-ai's update_reload_runner: a Node parented OUTSIDE the plugin (so it
+## survives set_plugin_enabled(false), including etk disabling ITSELF) that owns
+## the install-and-reload sequence — disable every affected plugin, extract each
+## managed addon subtree from the one downloaded repo archive, wait for a
+## filesystem scan, then re-enable the plugins so the editor reloads new scripts.
 ##
-## Only files under `addons/editor_tool_kit/` in the archive are touched: the
-## repo's top-level files (its own README, .gitignore, …) and everything else in
-## the consuming project are left alone. Extract overwrites + adds; it never
-## prunes, so a file removed upstream lingers until deleted by hand (same
-## limitation as the godot-ai updater).
+## It updates one OR several addons in a single pass: `start()` takes the list of
+## addon prefixes to extract and the list of plugin.cfg paths to toggle. Only files
+## under one of those `addons/<name>/` prefixes are touched; the repo's top-level
+## files and everything else in the consuming project are left alone. Extract
+## overwrites + adds; it never prunes, so a file removed upstream lingers until
+## deleted by hand (same limitation as the godot-ai updater).
 ##
-## Each file is written via `.tmp` + atomic rename with a per-file backup, and
-## any mid-batch failure rolls every already-written file back to its previous
-## contents. If the rollback ITSELF can't fully restore (FAILED_MIXED), the
-## runner refuses to re-enable the plugin and leaves it disabled — a failed
-## update never loads a half-installed tree.
+## Each file is written via `.tmp` + atomic rename with a per-file backup; any
+## mid-batch failure rolls every already-written file (across all addons in the
+## batch) back to its previous contents. If the rollback ITSELF can't fully restore
+## (FAILED_MIXED), the runner refuses to re-enable the plugins and leaves them
+## disabled — a failed update never loads a half-installed tree.
 ##
-## Frame-waiting + call_deferred between every step keeps the runner off the
-## stack while the filesystem scan reloads scripts (this very script is among the
-## files overwritten); the reload lands between steps, never mid-method. Fields
-## are kept untyped where they survive that scan, matching the codebase's
-## hot-reload-safe storage convention.
+## Frame-waiting + call_deferred between every step keeps the runner off the stack
+## while the filesystem scan reloads scripts (this very script may be among the
+## files overwritten); the reload lands between steps, never mid-method. Fields are
+## untyped where they survive that scan, matching the hot-reload-safe convention.
 
-const PLUGIN_CFG_PATH := "res://addons/editor_tool_kit/plugin.cfg"
 const INSTALL_BASE := "res://"
-const ADDON_REL_PREFIX := "addons/editor_tool_kit/"
 const TEMP_SUFFIX := ".etk_update_tmp"
 const BACKUP_SUFFIX := ".etk_update_backup"
 const PRE_DISABLE_FRAMES := 8
@@ -38,13 +36,17 @@ const SCAN_WATCHDOG_SECS := 30.0
 
 ## Extract outcome. OK: every listed file replaced. FAILED_CLEAN: a write failed
 ## but every already-written file was rolled back to its previous content (or
-## removed, if new) — safe to re-enable the previous plugin. FAILED_MIXED:
-## rollback itself failed, so the addon tree is a mix of old + new — the runner
-## MUST NOT re-enable the plugin.
+## removed, if new) — safe to re-enable the previous plugins. FAILED_MIXED:
+## rollback itself failed, so the tree is a mix of old + new — the runner MUST NOT
+## re-enable the plugins.
 enum InstallStatus { OK, FAILED_CLEAN, FAILED_MIXED }
 
 var _zip_path := ""
 var _temp_dir := ""
+## Addon subtrees to extract, e.g. ["addons/ui_kit/", "addons/editor_tool_kit/"].
+var _prefixes = []
+## plugin.cfg paths to disable before / re-enable after the extract (one per addon).
+var _plugin_cfgs = []
 var _detached = null
 var _started := false
 var _next_step := ""
@@ -56,20 +58,21 @@ var _watchdog = null
 ## Per-file install records: {target, backup, had_original}. Untyped Array —
 ## survives fs.scan() during the update.
 var _written = []
-## Set when _install_one's inner restore-from-backup can't complete: the failed
-## target is then NOT recorded in _written, so _rollback can't see it — this flag
-## promotes the outcome to FAILED_MIXED. Mirrors godot-ai's _restore_failed.
+## Set when _install_one's inner restore-from-backup can't complete: promotes the
+## outcome to FAILED_MIXED. Mirrors godot-ai's _restore_failed.
 var _restore_failed := false
 
 
-func start(zip_path: String, temp_dir: String, detached) -> void:
+func start(zip_path: String, temp_dir: String, prefixes: Array, plugin_cfgs: Array, detached) -> void:
 	if _started:
 		return
 	_started = true
 	_zip_path = zip_path
 	_temp_dir = temp_dir
+	_prefixes = prefixes
+	_plugin_cfgs = plugin_cfgs
 	_detached = detached
-	_wait_frames(PRE_DISABLE_FRAMES, "_disable_plugin")
+	_wait_frames(PRE_DISABLE_FRAMES, "_disable_plugins")
 
 
 # ── Frame waiter (lets deferred teardown drain between steps) ─────────────────
@@ -94,9 +97,10 @@ func _wait_frames(frame_count: int, next_step: String) -> void:
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-func _disable_plugin() -> void:
-	print("editor_tool_kit | update: disabling current plugin")
-	EditorInterface.set_plugin_enabled(PLUGIN_CFG_PATH, false)
+func _disable_plugins() -> void:
+	for cfg in _plugin_cfgs:
+		print("editor_tool_kit | update: disabling %s" % cfg)
+		EditorInterface.set_plugin_enabled(String(cfg), false)
 	_wait_frames(POST_DISABLE_FRAMES, "_extract")
 
 
@@ -106,26 +110,26 @@ func _extract() -> void:
 		_cleanup_temp()
 		## One scan after all writes: Godot's scan-time reparse then sees a single
 		## consistent v(N+1) snapshot, so new + existing files resolve each other.
-		_scan("_enable_plugin")
+		_scan("_enable_plugins")
 		return
 	if status == InstallStatus.FAILED_MIXED:
-		## Rollback couldn't fully restore the previous files: the addon tree is a
-		## mix of old + new and loading it would run mismatched scripts. Leave the
-		## plugin DISABLED and tell the user to recover by hand — the repo (and
-		## git) is the source of truth. *.etk_update_backup files are left on disk
-		## as a manual recovery aid.
+		## Rollback couldn't fully restore: the tree is a mix of old + new and loading
+		## it would run mismatched scripts. Leave the plugins DISABLED and tell the
+		## user to recover by hand — the repo (and git) is the source of truth.
+		## *.etk_update_backup files are left on disk as a manual recovery aid.
 		push_error(
 			"editor_tool_kit | self-update failed AND rollback could not restore the "
-			+ "previous files. The plugin is left disabled — restore "
-			+ "addons/editor_tool_kit/ from git (or re-copy it from the repo), then "
-			+ "re-enable the plugin. Look for *.etk_update_backup files to recover."
+			+ "previous files. The affected plugins are left disabled — restore the "
+			+ "addon folders from git (or re-copy them from the repo), then re-enable "
+			+ "the plugins. Look for *.etk_update_backup files to recover."
 		)
 		_wait_frames(POST_ENABLE_FRAMES, "_finish")
 		return
-	## FAILED_CLEAN: every written file was rolled back; bring the previous
-	## plugin version back so the kit isn't left disabled.
-	push_error("editor_tool_kit | self-update failed; rolled back, re-enabling the current version")
-	EditorInterface.set_plugin_enabled(PLUGIN_CFG_PATH, true)
+	## FAILED_CLEAN: every written file was rolled back; bring the previous plugin
+	## versions back so nothing is left disabled.
+	push_error("editor_tool_kit | self-update failed; rolled back, re-enabling current versions")
+	for cfg in _plugin_cfgs:
+		EditorInterface.set_plugin_enabled(String(cfg), true)
 	_wait_frames(POST_ENABLE_FRAMES, "_finish")
 
 
@@ -137,20 +141,21 @@ func _do_extract() -> int:
 		return InstallStatus.FAILED_CLEAN
 	var base := ProjectSettings.globalize_path(INSTALL_BASE)
 
-	# Map every addon archive entry to a project path, rejecting unsafe paths and
-	# refusing an archive that maps two entries onto one target (which would
-	# corrupt the per-file backup/rollback bookkeeping).
+	# Map every managed archive entry to a project path, rejecting unsafe paths and
+	# refusing an archive that maps two entries onto one target (which would corrupt
+	# the per-file backup/rollback bookkeeping). Track per-prefix that the addon's
+	# own plugin.cfg + plugin.gd are present, so a truncated archive can't wipe one.
 	var jobs := []
 	var seen := {}
-	var has_cfg := false
-	var has_plugin := false
+	var has_cfg := {}
+	var has_plugin := {}
 	for entry in reader.get_files():
 		if entry.ends_with("/"):
 			continue
-		var rel := _archive_rel(entry)
+		var rel := _archive_rel(entry, _prefixes)
 		if rel.is_empty():
 			continue
-		if not _is_safe(rel):
+		if not _is_safe(rel, _prefixes):
 			push_error("editor_tool_kit | update: refusing unsafe path %s" % entry)
 			reader.close()
 			return InstallStatus.FAILED_CLEAN
@@ -159,16 +164,18 @@ func _do_extract() -> int:
 			reader.close()
 			return InstallStatus.FAILED_CLEAN
 		seen[rel] = true
-		if rel == ADDON_REL_PREFIX + "plugin.cfg":
-			has_cfg = true
-		elif rel == ADDON_REL_PREFIX + "plugin.gd":
-			has_plugin = true
+		for prefix in _prefixes:
+			if rel == String(prefix) + "plugin.cfg":
+				has_cfg[prefix] = true
+			elif rel == String(prefix) + "plugin.gd":
+				has_plugin[prefix] = true
 		jobs.append({"entry": entry, "rel": rel})
 
-	if not has_cfg or not has_plugin:
-		push_error("editor_tool_kit | update: archive is missing plugin.cfg / plugin.gd")
-		reader.close()
-		return InstallStatus.FAILED_CLEAN
+	for prefix in _prefixes:
+		if not has_cfg.has(prefix) or not has_plugin.has(prefix):
+			push_error("editor_tool_kit | update: archive is missing %splugin.cfg / plugin.gd" % prefix)
+			reader.close()
+			return InstallStatus.FAILED_CLEAN
 
 	_written.clear()
 	_restore_failed = false
@@ -205,8 +212,8 @@ func _install_one(reader: ZIPReader, entry: String, rel: String, base: String) -
 		DirAccess.remove_absolute(tmp)
 		return false
 
-	## Back up the original via COPY (not rename) so the source stays in place
-	## until the rename succeeds; rolled back by `_rollback` on a later failure.
+	## Back up the original via COPY (not rename) so the source stays in place until
+	## the rename succeeds; rolled back by `_rollback` on a later failure.
 	var had_original := FileAccess.file_exists(target)
 	var backup := target + BACKUP_SUFFIX
 	if had_original:
@@ -222,10 +229,10 @@ func _install_one(reader: ZIPReader, entry: String, rel: String, base: String) -
 		DirAccess.remove_absolute(target)
 		if DirAccess.rename_absolute(tmp, target) != OK:
 			DirAccess.remove_absolute(tmp)
-			## target was removed above; restore it from the COPY backup so the
-			## tree is left in its previous state. If that restore can't complete,
-			## the target is now missing AND unrecorded in _written — flag
-			## FAILED_MIXED so the runner refuses to re-enable a half-installed tree.
+			## target was removed above; restore it from the COPY backup so the tree is
+			## left in its previous state. If that restore can't complete, the target is
+			## now missing AND unrecorded in _written — flag FAILED_MIXED so the runner
+			## refuses to re-enable a half-installed tree.
 			if had_original:
 				if FileAccess.file_exists(backup) and DirAccess.copy_absolute(backup, target) == OK:
 					DirAccess.remove_absolute(backup)
@@ -239,7 +246,7 @@ func _install_one(reader: ZIPReader, entry: String, rel: String, base: String) -
 
 ## Restore (or delete) every file already written this update, newest first.
 ## Returns true iff every restore succeeded (a clean rollback); false leaves the
-## tree mixed and the caller must not re-enable the plugin.
+## tree mixed and the caller must not re-enable the plugins.
 func _rollback() -> bool:
 	var ok := true
 	var i := _written.size() - 1
@@ -277,26 +284,33 @@ func _finalize_success() -> void:
 
 
 ## Map a zip entry to its project-relative addon path, or "" if it is not part of
-## the addon. Accepts `addons/editor_tool_kit/...` directly and the GitHub
-## branch-archive shape `<wrapper>/addons/editor_tool_kit/...` (exactly one
-## leading directory segment), but rejects deeper nesting like
-## `<wrapper>/templates/addons/editor_tool_kit/...` — so _is_safe()'s begins_with
-## stays a real guard and a stray nested copy elsewhere in the repo can't be
-## written into the live addon. Static so the verifier exercises it headless.
-static func _archive_rel(entry: String) -> String:
-	if entry.begins_with(ADDON_REL_PREFIX):
-		return entry
-	var slash := entry.find("/")
-	if slash >= 0 and entry.substr(slash + 1).begins_with(ADDON_REL_PREFIX):
-		return entry.substr(slash + 1)
+## any managed addon. Accepts `addons/<name>/...` directly and the GitHub
+## branch-archive shape `<wrapper>/addons/<name>/...` (exactly one leading
+## directory segment), but rejects deeper nesting like
+## `<wrapper>/templates/addons/<name>/...` — so _is_safe()'s begins_with stays a
+## real guard and a stray nested copy elsewhere in the repo can't be written into a
+## live addon. Static so the verifier exercises it headless.
+static func _archive_rel(entry: String, prefixes: Array) -> String:
+	for prefix in prefixes:
+		var p := String(prefix)
+		if entry.begins_with(p):
+			return entry
+		var slash := entry.find("/")
+		if slash >= 0 and entry.substr(slash + 1).begins_with(p):
+			return entry.substr(slash + 1)
 	return ""
 
 
 ## Static so the verifier exercises the path-traversal guard headless.
-static func _is_safe(rel: String) -> bool:
+static func _is_safe(rel: String, prefixes: Array) -> bool:
 	if rel.is_absolute_path() or rel.contains("\\"):
 		return false
-	if not rel.begins_with(ADDON_REL_PREFIX):
+	var under_prefix := false
+	for prefix in prefixes:
+		if rel.begins_with(String(prefix)):
+			under_prefix = true
+			break
+	if not under_prefix:
 		return false
 	for seg in rel.split("/", true):
 		if seg.is_empty() or seg == "." or seg == "..":
@@ -337,7 +351,7 @@ func _finish_scan() -> void:
 	var next_step := _scan_next
 	_scan_next = ""
 	if next_step.is_empty():
-		next_step = "_enable_plugin"
+		next_step = "_enable_plugins"
 	call_deferred(next_step)
 
 
@@ -364,16 +378,17 @@ func _on_watchdog_timeout() -> void:
 	_finish_scan()
 
 
-func _enable_plugin() -> void:
-	print("editor_tool_kit | update: enabling the new plugin version")
-	EditorInterface.set_plugin_enabled(PLUGIN_CFG_PATH, true)
+func _enable_plugins() -> void:
+	for cfg in _plugin_cfgs:
+		print("editor_tool_kit | update: enabling %s" % cfg)
+		EditorInterface.set_plugin_enabled(String(cfg), true)
 	_wait_frames(POST_ENABLE_FRAMES, "_finish")
 
 
 func _finish() -> void:
 	## `_detached` is null in the current integration (the plugin frees its own
-	## panel before starting the runner); the guard keeps the runner reusable for
-	## a caller that hands a live control across the reload.
+	## panel before starting the runner); the guard keeps the runner reusable for a
+	## caller that hands a live control across the reload.
 	if _detached != null and is_instance_valid(_detached):
 		_detached.queue_free()
 	_detached = null

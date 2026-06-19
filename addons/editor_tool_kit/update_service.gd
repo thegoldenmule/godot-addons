@@ -1,39 +1,29 @@
 @tool
 extends "res://addons/editor_tool_kit/tool_service.gd"
 
-## Self-update service for the editor_tool_kit addon. Mirrors the godot-ai model:
-## the kit is committed into the consuming project (so a fresh clone works
-## offline) but is *sourced* from a standalone repo, and this service checks that
-## repo for a newer version and pulls it in place.
+## The self-update MANAGER service: editor_tool_kit acts as the package manager for
+## every vendored addon that opts in with an `[update]` marker in its plugin.cfg
+## (see package_registry.gd). One dock, one "Check / Update all", instead of a
+## per-addon updater. Each managed addon — including etk itself — is a row.
 ##
-## Source of truth for "what version is upstream" is the repo's
-## `addons/editor_tool_kit/plugin.cfg` `version` on BRANCH — bumping it and
-## pushing is what ships an update; no GitHub release ceremony required. The
-## check reads that file raw; the install downloads the branch archive zip and
-## extracts only the `addons/editor_tool_kit/` subtree (see update_reload_runner).
+## Source of truth for "what version is upstream" is each addon's own
+## `plugin.cfg` `version` on its tracked branch (read raw); installing downloads
+## the branch archive zip ONCE per source and extracts every stale addon's subtree
+## in a single pass (see update_reload_runner). Bumping an addon's version +
+## pushing is what ships it — no GitHub-release ceremony.
 ##
 ## HARD RULE (ToolService): holds NO Control / EditorInterface references, so it
 ## loads under `godot --headless`. The version-parse + compare helpers are static
 ## so the headless verifier exercises them with no editor and no network; the
-## HTTPRequest paths need the scene tree (the service has it as a plugin child)
-## and are simply not driven headless. The EditorSettings-backed "auto-check"
-## preference lives in the plugin/panel, which legitimately touch EditorInterface.
+## HTTPRequest paths need the scene tree (the service is a plugin child) and are
+## simply not driven headless.
 
-# ── Source repo ───────────────────────────────────────────────────────────────
-const REPO_OWNER := "thegoldenmule"
-const REPO_NAME := "godot-addons"
-const BRANCH := "main"
-const REPO_PAGE := "https://github.com/thegoldenmule/godot-addons"
-## Raw plugin.cfg on the tracked branch — the version source of truth.
-const REMOTE_CFG_URL := "https://raw.githubusercontent.com/thegoldenmule/godot-addons/main/addons/editor_tool_kit/plugin.cfg"
-## Branch tarball (redirects to codeload; HTTPRequest follows with max_redirects).
-const ARCHIVE_URL := "https://github.com/thegoldenmule/godot-addons/archive/refs/heads/main.zip"
+const Registry := preload("res://addons/editor_tool_kit/package_registry.gd")
 
-const LOCAL_CFG_PATH := "res://addons/editor_tool_kit/plugin.cfg"
 const UPDATE_TEMP_DIR := "user://editor_tool_kit_update/"
 const UPDATE_TEMP_ZIP := "user://editor_tool_kit_update/update.zip"
 
-# ── Status machine (string states so the dock can switch on them) ─────────────
+# ── Per-package status (string states so the dock can switch on them) ──────────
 const ST_IDLE := "idle"
 const ST_CHECKING := "checking"
 const ST_UP_TO_DATE := "up_to_date"
@@ -42,102 +32,188 @@ const ST_DOWNLOADING := "downloading"
 const ST_INSTALLING := "installing"
 const ST_ERROR := "error"
 
-## Emitted on every state change; the dock re-renders from the public fields.
+## Emitted on every state change; the dock re-renders from `packages` + `message`.
 signal changed
 
-var status := ST_IDLE
-var latest_version := ""
+## Manager-level summary line for the header, and overall busy state.
 var message := ""
+var busy := false
 
-## Untyped on purpose: the same self-update window that overwrites this script
-## also overwrites plugin.gd, and a static-typed reference into a script being
-## hot-reloaded is part of the crash class (see update_manager.gd in godot-ai).
+## Runtime package rows: each is a Registry descriptor (name/folder/prefix/urls…)
+## merged with the mutable fields {installed, latest, state, note}. The dock reads
+## these directly. Untyped Array, matching the kit's hot-reload-safe storage.
+var packages := []
+
+## Untyped on purpose: the same self-update that overwrites this script also
+## overwrites plugin.gd, and a static-typed reference into a script being
+## hot-reloaded is part of the crash class.
 var _plugin
 
-var _http: HTTPRequest
+## In-flight check requests, keyed by package folder → HTTPRequest. Lets several
+## addons' version checks run at once and be cleaned up independently.
+var _checks := {}
 var _dl: HTTPRequest
 
 
 func setup(plugin) -> void:
 	_plugin = plugin
+	refresh()
 
 
 func _exit_tree() -> void:
-	## If the editor tears the service down mid-download (plugin disabled, editor
-	## quitting), drop the partial staging file so it doesn't linger in user://.
-	## A leftover could never be installed anyway — the runner validates the
-	## archive before touching the tree — this is just hygiene. A successful
-	## update is in ST_INSTALLING here, not ST_DOWNLOADING, so the zip the runner
-	## still needs is left in place.
-	if status == ST_DOWNLOADING:
+	## Drop a partial staging zip if torn down mid-download (a successful install is
+	## in ST_INSTALLING here, so its zip — which the runner still needs — is left).
+	if _is_state(ST_DOWNLOADING):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(UPDATE_TEMP_ZIP))
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(UPDATE_TEMP_DIR))
 
 
-## This addon's own installed version, read from its plugin.cfg.
-func installed_version() -> String:
+# ── Discovery ─────────────────────────────────────────────────────────────────
+
+## (Re)scan res://addons for managed packages, seeding each row's installed
+## version. Preserves any already-known `latest`/`state` for a still-present addon
+## so a refresh mid-session doesn't blank the dock.
+func refresh() -> void:
+	var prev := {}
+	for p in packages:
+		prev[p["folder"]] = p
+	var rows := []
+	for desc in Registry.discover():
+		var row = desc.duplicate()
+		row["installed"] = installed_version(desc["cfg_path"])
+		var old = prev.get(desc["folder"])
+		row["latest"] = old["latest"] if old else ""
+		row["state"] = old["state"] if old else ST_IDLE
+		row["note"] = old["note"] if old else ""
+		rows.append(row)
+	packages = rows
+	changed.emit()
+
+
+## A package's installed version, read from its own plugin.cfg.
+static func installed_version(cfg_path: String) -> String:
 	var cfg := ConfigFile.new()
-	if cfg.load(LOCAL_CFG_PATH) != OK:
+	if cfg.load(cfg_path) != OK:
 		return ""
 	return str(cfg.get_value("plugin", "version", ""))
 
 
 func is_busy() -> bool:
-	return status == ST_CHECKING or status == ST_DOWNLOADING or status == ST_INSTALLING
+	return busy
 
 
-func has_update() -> bool:
-	return status == ST_UPDATE_AVAILABLE
+func has_any_update() -> bool:
+	for p in packages:
+		if p["state"] == ST_UPDATE_AVAILABLE:
+			return true
+	return false
 
 
 # ── Version check ─────────────────────────────────────────────────────────────
 
-func check_for_updates() -> void:
-	if is_busy():
+func check_all() -> void:
+	if busy:
 		return
-	_set_state(ST_CHECKING, "Checking %s…" % REPO_NAME)
-	if _http == null:
-		_http = HTTPRequest.new()
-		_http.request_completed.connect(_on_check_completed)
-		add_child(_http)
-	# A no-op when nothing is in flight; guards against ERR_BUSY on a re-check.
-	_http.cancel_request()
-	var err := _http.request(
-		REMOTE_CFG_URL, ["Accept: text/plain", "User-Agent: editor_tool_kit"]
+	refresh()
+	if packages.is_empty():
+		_summary("No managed addons found.")
+		return
+	for p in packages:
+		check_one(p)
+
+
+func check_one(pkg) -> void:
+	## Guard against a re-check of an addon already in flight.
+	if _checks.has(pkg["folder"]):
+		return
+	pkg["state"] = ST_CHECKING
+	pkg["note"] = ""
+	var http := HTTPRequest.new()
+	http.request_completed.connect(_on_check_completed.bind(pkg, http))
+	add_child(http)
+	_checks[pkg["folder"]] = http
+	_recompute_busy()
+	var err := http.request(
+		pkg["remote_cfg_url"], ["Accept: text/plain", "User-Agent: editor_tool_kit"]
 	)
 	if err != OK:
-		_set_state(ST_ERROR, "Couldn't start the version check (err %d)" % err)
+		_finish_check(pkg, http, ST_ERROR, "Couldn't start the version check (err %d)" % err)
 
 
 func _on_check_completed(
-	result: int, code: int, _headers: PackedStringArray, body: PackedByteArray
+	result: int, code: int, _headers: PackedStringArray, body: PackedByteArray, pkg, http
 ) -> void:
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
-		_set_state(ST_ERROR, "Version check failed (result %d, HTTP %d)" % [result, code])
+		_finish_check(pkg, http, ST_ERROR, "Check failed (result %d, HTTP %d)" % [result, code])
 		return
 	var remote := parse_remote_version(body.get_string_from_utf8())
 	if remote.is_empty():
-		_set_state(ST_ERROR, "Couldn't read the upstream version")
+		_finish_check(pkg, http, ST_ERROR, "Couldn't read the upstream version")
 		return
-	latest_version = remote
-	var local := installed_version()
-	if is_newer(remote, local):
-		_set_state(
-			ST_UPDATE_AVAILABLE, "Update available: v%s (installed v%s)" % [remote, local]
-		)
+	pkg["latest"] = remote
+	if is_newer(remote, str(pkg["installed"])):
+		_finish_check(pkg, http, ST_UPDATE_AVAILABLE, "")
 	else:
-		_set_state(ST_UP_TO_DATE, "Up to date (v%s)" % local)
+		_finish_check(pkg, http, ST_UP_TO_DATE, "")
+
+
+func _finish_check(pkg, http: HTTPRequest, state: String, note: String) -> void:
+	pkg["state"] = state
+	pkg["note"] = note
+	_checks.erase(pkg["folder"])
+	if is_instance_valid(http):
+		http.queue_free()
+	_recompute_busy()
+	if _checks.is_empty():
+		_summarize_after_check()
+	changed.emit()
+
+
+func _summarize_after_check() -> void:
+	var n := 0
+	for p in packages:
+		if p["state"] == ST_UPDATE_AVAILABLE:
+			n += 1
+	if n > 0:
+		message = "%d update%s available." % [n, "" if n == 1 else "s"]
+	else:
+		message = "Everything is up to date."
 
 
 # ── Download + hand-off to the install runner ─────────────────────────────────
 
-func start_update() -> void:
-	if status != ST_UPDATE_AVAILABLE:
+func update_one(pkg) -> void:
+	_install([pkg])
+
+
+func update_all() -> void:
+	var stale := []
+	for p in packages:
+		if p["state"] == ST_UPDATE_AVAILABLE:
+			stale.append(p)
+	_install(stale)
+
+
+## Download the (shared) branch archive once and hand every package in `list` to
+## the reload runner. All packages in a single action must share one archive — the
+## common case, since the addons ship from one repo. A mixed set is reported rather
+## than silently half-applied.
+func _install(list: Array) -> void:
+	if busy or list.is_empty():
 		return
 	if _plugin == null or not _plugin.has_method("install_downloaded_update"):
-		_set_state(ST_ERROR, "Update host unavailable")
+		_summary("Update host unavailable")
 		return
-	_set_state(ST_DOWNLOADING, "Downloading v%s…" % latest_version)
+	var archive: String = list[0]["archive_url"]
+	for p in list:
+		if p["archive_url"] != archive:
+			_summary("Selected addons ship from different sources — update them separately.")
+			return
+	for p in list:
+		p["state"] = ST_DOWNLOADING
+	_summary("Downloading update…")
+	_recompute_busy()
+
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(UPDATE_TEMP_DIR))
 	var zip := ProjectSettings.globalize_path(UPDATE_TEMP_ZIP)
 	if _dl != null:
@@ -145,48 +221,80 @@ func start_update() -> void:
 	_dl = HTTPRequest.new()
 	_dl.download_file = zip
 	_dl.max_redirects = 10
-	_dl.request_completed.connect(_on_download_completed)
+	_dl.request_completed.connect(_on_download_completed.bind(list))
 	add_child(_dl)
-	var err := _dl.request(ARCHIVE_URL, ["User-Agent: editor_tool_kit"])
+	var err := _dl.request(archive, ["User-Agent: editor_tool_kit"])
 	if err != OK:
-		## request_completed never fires when request() itself errors, so clean
-		## up inline rather than leaking the HTTPRequest + a partial zip.
+		## request_completed never fires when request() itself errors — clean up here.
 		_dl.queue_free()
 		_dl = null
 		DirAccess.remove_absolute(zip)
-		_set_state(ST_ERROR, "Download couldn't start (err %d)" % err)
+		for p in list:
+			p["state"] = ST_ERROR
+			p["note"] = "Download couldn't start (err %d)" % err
+		_summary("Download couldn't start (err %d)" % err)
+		_recompute_busy()
 
 
 func _on_download_completed(
-	result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray
+	result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray, list: Array
 ) -> void:
 	if _dl != null:
 		_dl.queue_free()
 		_dl = null
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
-		_set_state(ST_ERROR, "Download failed (result %d, HTTP %d)" % [result, code])
+		for p in list:
+			p["state"] = ST_ERROR
+			p["note"] = "Download failed (result %d, HTTP %d)" % [result, code]
+		_summary("Download failed (result %d, HTTP %d)" % [result, code])
+		_recompute_busy()
 		return
-	_set_state(ST_INSTALLING, "Installing v%s… the editor will reload." % latest_version)
+	for p in list:
+		p["state"] = ST_INSTALLING
+	_summary("Installing… the editor will reload.")
 	## Deferred so this HTTP callback returns before the plugin disable + extract
-	## begins (the install tears down our own dock and reloads this plugin).
-	_begin_install.call_deferred()
+	## begins (the install tears down our own dock and reloads the affected plugins).
+	_begin_install.bind(list).call_deferred()
 
 
-func _begin_install() -> void:
-	if _plugin != null and _plugin.has_method("install_downloaded_update"):
-		_plugin.install_downloaded_update(UPDATE_TEMP_ZIP, UPDATE_TEMP_DIR)
+func _begin_install(list: Array) -> void:
+	if _plugin == null or not _plugin.has_method("install_downloaded_update"):
+		return
+	var prefixes := []
+	var plugin_cfgs := []
+	for p in list:
+		prefixes.append(p["prefix"])
+		plugin_cfgs.append(p["cfg_path"])
+	_plugin.install_downloaded_update(UPDATE_TEMP_ZIP, UPDATE_TEMP_DIR, prefixes, plugin_cfgs)
 
 
-# ── State + pure helpers ──────────────────────────────────────────────────────
+# ── State helpers ─────────────────────────────────────────────────────────────
 
-func _set_state(new_status: String, msg: String = "") -> void:
-	status = new_status
+func _summary(msg: String) -> void:
 	message = msg
 	changed.emit()
 
 
-## Reads the `version` out of a plugin.cfg's raw text. Static + ConfigFile.parse
-## so the verifier drives it with a literal string (no editor, no network).
+func _recompute_busy() -> void:
+	var b := not _checks.is_empty() or _dl != null
+	if not b:
+		for p in packages:
+			if p["state"] == ST_DOWNLOADING or p["state"] == ST_INSTALLING:
+				b = true
+				break
+	busy = b
+
+
+func _is_state(state: String) -> bool:
+	for p in packages:
+		if p["state"] == state:
+			return true
+	return false
+
+
+# ── Pure helpers (static; the verifier drives them with literal strings) ──────
+
+## Reads the `version` out of a plugin.cfg's raw text.
 static func parse_remote_version(cfg_text: String) -> String:
 	var cfg := ConfigFile.new()
 	if cfg.parse(cfg_text) != OK:

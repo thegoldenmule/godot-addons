@@ -43,9 +43,9 @@ func _enter_tree() -> void:
 	if _service != null and _service.has_method("setup"):
 		_service.setup(self)
 	if _service != null and _auto_check_enabled():
-		## Deferred so the service (and its HTTPRequest child) is fully in-tree
-		## before the first request fires.
-		_service.check_for_updates.call_deferred()
+		## Deferred so the service (and its HTTPRequest children) are fully in-tree
+		## before the first requests fire.
+		_service.check_all.call_deferred()
 
 
 func _register_settings() -> void:
@@ -58,12 +58,17 @@ func _register_settings() -> void:
 	es.add_property_info({"name": SETTING_AUTO_CHECK, "type": TYPE_BOOL})
 
 
-## Hand-off from UpdateService once the archive is downloaded. The reload runner
-## is about to set_plugin_enabled(false); a mounted Control being freed mid-reload
-## is the hot-reload crash class, so tear our panel down here FIRST and null the
+## Hand-off from UpdateService once the archive is downloaded. `prefixes` are the
+## addon subtrees to extract and `plugin_cfgs` the plugins to toggle (one update
+## action can cover several addons, including etk itself). The reload runner is
+## about to set_plugin_enabled(false); a mounted Control being freed mid-reload is
+## the hot-reload crash class, so tear our panel down here FIRST and null the
 ## base's refs (so EditorToolPlugin._exit_tree doesn't double-free it). The runner
-## is then parented OUTSIDE this plugin so it survives the disable.
-func install_downloaded_update(zip_path: String, temp_dir: String) -> void:
+## is then parented OUTSIDE this plugin so it survives the disable — including etk
+## disabling itself.
+func install_downloaded_update(
+	zip_path: String, temp_dir: String, prefixes: Array, plugin_cfgs: Array
+) -> void:
 	if _panel_root != null:
 		remove_control_from_bottom_panel(_panel_root)
 		_panel_root.queue_free()
@@ -76,7 +81,7 @@ func install_downloaded_update(zip_path: String, temp_dir: String) -> void:
 		host.add_child(runner)
 	else:
 		get_tree().root.add_child(runner)
-	runner.start(zip_path, temp_dir, null)
+	runner.start(zip_path, temp_dir, prefixes, plugin_cfgs, null)
 
 
 func _auto_check_enabled() -> bool:

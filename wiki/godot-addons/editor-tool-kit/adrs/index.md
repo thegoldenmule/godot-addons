@@ -14,3 +14,4 @@ Architectural decision records for Editor Tool Kit — the durable rationale beh
 - [ADR-6: Vendored-but-sourced distribution with in-editor self-update; version is the ship signal](decision-record:mql3d6a1-01th-xfycdx)
 - [ADR-7: Self-update extracts only the addon subtree, never prunes, and rolls back on failure](decision-record:mql3d7rm-01tl-2ebxlo)
 - [ADR-8: ContentStore owns the atomic write but not serialization, which stays per-tool](decision-record:mql3d8m5-01tn-my3yd)
+- [ADR-9: editor_tool_kit is the package manager; addons opt in via an [update] marker and ship no update machinery](decision-record:mql6tar6-02c0-zgxeyx)

@@ -3,7 +3,7 @@
 **Status:** active
 
 ## Body
-The **version is the ship signal**: there is no GitHub-release ceremony. The addon is vendored into consuming projects but sourced from this repo; consumers pull updates through the **Editor Tool Kit** bottom-panel tab.
+The **version is the ship signal**: there is no GitHub-release ceremony. Addons are vendored into consuming projects but sourced from this repo; consumers pull updates through the **Editor Tool Kit** bottom-panel tab, which is the **package manager** for every managed addon (including etk itself).
 
 ## Releasing an update
 
@@ -15,8 +15,8 @@ The check reads `plugin.cfg` raw from the default branch (`raw.githubusercontent
 ## How a consumer updates
 
 1. Open the **Editor Tool Kit** bottom-panel tab in the Godot editor.
-2. Press **Check for updates** (or leave _Check for updates when the editor opens_ on). It compares the installed version to the repo's.
-3. If newer, press **Update now** — it downloads the archive, replaces `addons/editor_tool_kit/` in place, and reloads the plugin.
+2. Press **Check all** (or leave _Check for updates when the editor opens_ on). Each managed addon's installed version is compared to its upstream.
+3. For any addon that is behind, press its row's **Update** (or **Update all**) — it downloads the branch archive once, replaces the addon subtree(s) in place, and reloads the affected plugins.
 
 ## Limits
 
@@ -25,6 +25,10 @@ The check reads `plugin.cfg` raw from the default branch (`raw.githubusercontent
 - The in-editor reload needs Godot **4.4+**.
 
 For the extract/rollback internals (anchored prefix, `FAILED_MIXED` guard), see Self-update & distribution.
+
+## Managing other addons
+
+The same tab manages every addon that carries an `[update]` marker in its `plugin.cfg` — not just etk. To make an addon self-update, add the marker (`source` / `branch` / `prefix`) and give it _no_ update machinery of its own; etk's dock discovers it and lists it as a row. The addon then needs etk vendored + enabled alongside it.
 
 ## References
 _None._

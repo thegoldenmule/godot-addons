@@ -7,6 +7,6 @@ export_presets.cfg
 .DS_Store
 
 # Self-update staging (only ever written into a consuming project's user://).
-# One per self-updating addon — add a line when you add an addon.
-ui_kit_update/
+# editor_tool_kit is the package manager — it stages every addon's update here,
+# so there is one staging dir regardless of how many addons are managed.
 editor_tool_kit_update/

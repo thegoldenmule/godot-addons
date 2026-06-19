@@ -16,7 +16,7 @@ transitions and a semantic UI automation layer you can drive from an LLM / MCP
 | `ui_screen_scaffold.gd` | `class_name UiScreenScaffold` — a `MarginContainer` that gives screens consistent padding + a centered max content width. |
 | `ui_reg.gd` | `class_name UiReg` — control registration as a byproduct of construction. Factories (`button/check/slider/line_edit/texture_button`) + `screen()/adopt()` stamp `ui_id`/`ui_screen` metadata on the live tree. |
 | `ui_driver.gd` | `UiDriver` — the automation layer: `state()/screens()/actions()/goto()/press()/toggle()/set_value()/set_text()/run()/flow()`. Knows no game specifics; sources all content from the host. |
-| `plugin.gd` + `update/` | The editor plugin: a "UI Kit" bottom-panel dock that self-updates from `github.com/thegoldenmule/godot-addons`. |
+| `plugin.gd` | A near-empty editor plugin (no autoloads, no update dock of its own). Updates are handled by the `editor_tool_kit` package manager — ui_kit opts in via the `[update]` marker in `plugin.cfg`. |
 
 ## Wiring (consuming project)
 
@@ -87,9 +87,20 @@ host's `mcp_step("swipe", "up")`.
 
 ## Self-update
 
+ui_kit is updated by the **`editor_tool_kit`** package manager, not by itself — it
+carries no update machinery, only an `[update]` marker in its `plugin.cfg`:
+
+```ini
+[update]
+source = "thegoldenmule/godot-addons"
+branch = "main"
+prefix = "addons/ui_kit/"
+```
+
 Versioning is the `version` field in `plugin.cfg`. To ship an update: bump it,
 commit, and push to `main` of `github.com/thegoldenmule/godot-addons`. Consuming
-projects see it via the "UI Kit" dock (Check for updates → Update now), which
+projects see it via the "Editor Tool Kit" dock (Check all → Update), which
 downloads the branch archive and replaces only the `addons/ui_kit/` subtree in
 place (atomic per-file, with rollback). It overwrites + adds but never prunes, so
-a file removed upstream must be deleted by hand.
+a file removed upstream must be deleted by hand. **Requires `editor_tool_kit` to be
+vendored + enabled alongside ui_kit.**

@@ -20,5 +20,7 @@ A file removed upstream lingers in the consumer until deleted by hand; never-pru
 
 The runner is parented outside the plugin so it survives set_plugin_enabled(false) during the swap.
 
+Generalized by ADR-9: the same anchored-prefix / never-prune / atomic-rollback / FAILED_MIXED extract now runs over the SET of managed addon prefixes (the package manager updates several addons, including etk itself, from one archive) rather than the single fixed addons/editor_tool_kit/ prefix.
+
 ## Relations
 _None._

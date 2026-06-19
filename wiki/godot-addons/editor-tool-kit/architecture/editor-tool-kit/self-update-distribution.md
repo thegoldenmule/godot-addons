@@ -6,13 +6,15 @@
 subsystem
 
 ## Summary
-The kit's **own tool**: an **"Editor Tool Kit"** bottom-panel tab that checks the source repo and pulls a newer copy of the addon in place. Three pieces built on the kit's own framework — **`UpdateService`** (a `ToolService`), **`UpdatePanel`** (the dock), and **`update_reload_runner.gd`** (the detached extract/reload runner) — so the kit dogfoods the bases it ships, mirroring how the godot-ai plugin distributes itself.
+The kit's **package manager**: an **"Editor Tool Kit"** bottom-panel tab that manages updates for *every* vendored addon that opts in with an `[update]` marker in its `plugin.cfg` (including etk itself). Each managed addon is a row — installed → upstream version, with a per-row Update plus Check-all / Update-all. Built on the kit's own framework — **`PackageRegistry`** (discovery), **`UpdateService`** (a `ToolService` manager), **`UpdatePanel`** (the dock), and **`update_reload_runner.gd`** (the detached extract/reload runner) — so the kit dogfoods the bases it ships, mirroring how the godot-ai plugin distributes itself.
 
 ## Purpose
-The addon is committed into a consuming project (a fresh clone works offline) but its source of truth is this standalone repo. The panel lets a consumer pull updates in place without a manual re-vendor, and proves the framework is enough to build a real tool on.
+Addons are committed into a consuming project (a fresh clone works offline) but their source of truth is this standalone repo. Consolidating updates into one manager means a single UI updates every addon in place without a manual re-vendor, and a managed addon ships NO update code of its own — it just declares an `[update]` marker. (A managed addon therefore requires editor_tool_kit vendored + enabled alongside it.)
 
 ## Design notes
-update_reload_runner.gd is parented OUTSIDE the plugin so it survives set_plugin_enabled(false). It disables the plugin, extracts ONLY the archive's addons/editor_tool_kit/ subtree (atomic .tmp + rename per file with rollback; an anchored-prefix mapping that accepts the path directly or under one branch-archive wrapper segment but rejects deeper-nested copies; a duplicate-target abort; and a FAILED_MIXED guard that leaves the plugin DISABLED rather than load a half-installed tree), waits for a filesystem scan, then re-enables the plugin.
+PackageRegistry scans res://addons/*/plugin.cfg for an [update] marker (source/branch/prefix) and derives the raw-cfg + archive URLs per managed addon — all static + editor-free, so the verifier drives it headless.
+
+update_reload_runner.gd is parented OUTSIDE the plugin so it survives set_plugin_enabled(false) — including etk disabling ITSELF. It disables every affected plugin, extracts each managed addons/<name>/ subtree from the one downloaded archive (atomic .tmp + rename per file with rollback; an anchored multi-prefix mapping that accepts a path directly or under one branch-archive wrapper segment but rejects deeper-nested copies; a duplicate-target abort; and a FAILED_MIXED guard that leaves the affected plugins DISABLED rather than load a half-installed tree), waits for a filesystem scan, then re-enables the plugins.
 
 ## Components
 _No components._
@@ -25,17 +27,19 @@ _No components._
 - class `UpdateService` in `addons/editor_tool_kit/update_service.gd`
 - class `UpdatePanel` in `addons/editor_tool_kit/update_panel.gd`
 - file `Detached extract → fs scan → plugin reload` in `addons/editor_tool_kit/update_reload_runner.gd`
+- file `PackageRegistry — discovers managed addons from plugin.cfg [update] markers` in `addons/editor_tool_kit/package_registry.gd`
 
 ## Data model
 _None._
 
 ## Usage
-Open the **Editor Tool Kit** tab and press **Check for updates** (or leave *Check for updates when the editor opens* on). It compares the installed `plugin.cfg` `version` to the repo's `plugin.cfg` read RAW from the default branch; if newer, **Update now** downloads the branch-archive zip, replaces `addons/editor_tool_kit/` in place, and reloads the plugin. Requires Godot 4.4+ for the in-editor reload.
+Open the **Editor Tool Kit** tab and press **Check all** (or leave *Check for updates when the editor opens* on). For each managed addon it compares the installed `plugin.cfg` `version` to the upstream `plugin.cfg` read RAW from that addon's tracked branch; where newer, the per-row **Update** or **Update all** downloads the branch-archive zip ONCE, extracts every stale addon's subtree in place, and reloads the affected plugins. Requires Godot 4.4+ for the in-editor reload.
 
 ## Invariants & constraints
 - Version IS the ship signal: bump `version` in the repo's plugin.cfg and push to the default branch — no GitHub-release ceremony.
-- The in-editor self-update writes ONLY the archive's addons/editor_tool_kit/ subtree (anchored prefix; overwrites + adds but never prunes), and on a failed install refuses to re-enable the plugin if rollback leaves a mixed old+new tree.
 - An update clobbers local edits to the vendored copy — the repo is the source of truth; land changes there.
+- The in-editor self-update writes ONLY the managed addons/<name>/ subtrees (anchored prefixes from each addon's [update] marker; overwrites + adds but never prunes), and on a failed install refuses to re-enable the affected plugins if rollback leaves a mixed old+new tree.
+- A managed addon carries NO update machinery of its own — only an [update] marker in its plugin.cfg. etk is the package manager, so a managed addon requires etk vendored + enabled alongside it.
 
 ## Synced commit
 501411d

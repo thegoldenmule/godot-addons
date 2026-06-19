@@ -8,11 +8,12 @@ are inherited. The kit is mostly a **framework**: enabling it keeps the
 It is **vendored** into this project but **sourced** from a standalone repo
 ([github.com/thegoldenmule/godot-addons](https://github.com/thegoldenmule/godot-addons)) —
 so its own `plugin.gd` mounts one small thing of its own: an **"Editor Tool Kit"**
-bottom-panel tab that checks that repo for a newer version and self-updates in
-place (see [Self-update](#self-update)), mirroring how the godot-ai plugin
-distributes itself. That panel is built on the kit's *own* framework (its
-`UpdateService` is a `ToolService`, its `UpdatePanel` is the dock), so the kit
-dogfoods the bases it ships.
+bottom-panel tab that is the **package manager** for every vendored addon. It lists
+each addon carrying an `[update]` marker (including etk itself) as a row, checks the
+repo for newer versions, and self-updates them in place — one UI for all addons
+(see [Self-update](#self-update)), mirroring how the godot-ai plugin distributes
+itself. That panel is built on the kit's *own* framework (its `UpdateService` is a
+`ToolService`, its `UpdatePanel` is the dock), so the kit dogfoods the bases it ships.
 
 A consuming tool is a *service + a view* (see the recipe below); a tool that wants
 MCP/CLI access adds a `BridgeServer`. The kit's own self-update panel is built the
@@ -111,29 +112,36 @@ Godot's `Control.theme` cascade:
   `_resolve_port()` and `_route(method, path, query, body) -> {code, payload}`.
   Opt-in per tool.
 
-## Self-update
+## Self-update (the package manager)
 
 The kit is committed into the project (a fresh clone works offline) but is
-*sourced* from `github.com/thegoldenmule/godot-addons`. The **"Editor Tool
-Kit"** bottom-panel tab checks that repo and pulls a newer copy in place:
+*sourced* from `github.com/thegoldenmule/godot-addons`. The **"Editor Tool Kit"**
+bottom-panel tab is the **package manager** for every vendored addon: it discovers
+each addon carrying an `[update]` marker in its `plugin.cfg` (including etk itself),
+lists them as rows, and pulls newer copies in place — one UI, no per-addon docks.
 
-- **`update_service.gd`** (`ToolService`) — owns the version check + download.
-  `parse_remote_version` / `is_newer` are **static + headless-testable** (the
-  verifier drives them with no editor or network).
-- **`update_panel.gd`** (the dock) — status line, a *Check for updates* /
-  *Update now* button pair, and a Settings group (an auto-check-on-open toggle,
-  the source repo). Pure view over the service.
+- **`package_registry.gd`** — static discovery: scans `res://addons/*/plugin.cfg`
+  for the `[update]` marker and builds a descriptor (`source`/`branch`/`prefix` +
+  the derived raw-cfg / archive / repo URLs) per managed addon. All static +
+  editor-free, so the verifier drives it headless.
+- **`update_service.gd`** (`ToolService`) — the manager: per-addon version checks +
+  one shared archive download. `parse_remote_version` / `is_newer` are **static +
+  headless-testable** (no editor or network).
+- **`update_panel.gd`** (the dock) — a row per managed addon (name, installed →
+  upstream, status, per-row Update), Check-all / Update-all, and an auto-check-on-open
+  toggle. Pure view over the service.
 - **`update_reload_runner.gd`** — a node parented **outside** the plugin (so it
-  survives `set_plugin_enabled(false)`); disables the plugin, extracts the
-  archive's `addons/editor_tool_kit/` subtree (atomic `.tmp` + rename per file,
-  with rollback on any failure), waits for a filesystem scan, then re-enables
-  the plugin. Adapted from godot-ai's runner.
+  survives `set_plugin_enabled(false)`, including etk disabling *itself*); disables
+  every affected plugin, extracts each managed `addons/<name>/` subtree from the one
+  downloaded archive (atomic `.tmp` + rename per file, with rollback on any failure),
+  waits for a filesystem scan, then re-enables the plugins. Adapted from godot-ai's
+  runner.
 
-**Version is the ship signal.** The source of truth is `plugin.cfg`'s `version`
-on the repo's default branch — checked raw at
-`raw.githubusercontent.com/.../addons/editor_tool_kit/plugin.cfg`. To release an
-update: bump `version` here, copy the addon into the repo, and push. The panel
-compares dotted versions and lights up *Update now* when upstream is newer.
+**Version is the ship signal.** The source of truth is each addon's `plugin.cfg`
+`version` on its tracked branch — checked raw via the marker's `source`/`branch`/
+`prefix`. To release an update: bump `version` in the addon, copy it into the repo,
+and push. The dock compares dotted versions and lights up *Update* when upstream is
+newer. A managed addon needs etk vendored + enabled alongside it.
 
 Notes / limits: the install **overwrites + adds** files but never **prunes**, so
 a file removed upstream lingers until deleted by hand. An update **clobbers local
