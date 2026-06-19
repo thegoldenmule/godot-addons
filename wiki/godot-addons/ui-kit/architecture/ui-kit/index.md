@@ -51,4 +51,4 @@ A consuming project copies `addons/ui_kit/` in, enables the plugin, and declares
 - Vendored but sourced from github.com/thegoldenmule/godot-addons: land changes in that repo, never in a consumer's vendored copy. Updates are applied by the editor_tool_kit package manager, which overwrites addons/ui_kit/ in place (and never prunes) — so ui_kit requires etk vendored + enabled alongside it.
 
 ## Synced commit
-_None._
+33846ec

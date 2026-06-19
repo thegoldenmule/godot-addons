@@ -52,4 +52,4 @@ A tool is three small files, each subclassing a base: `plugin.gd` (`extends Edit
 - The kit is vendored/committed but sourced from github.com/thegoldenmule/godot-addons; land changes in this repo, never in a consumer's vendored copy (self-update clobbers local edits).
 
 ## Synced commit
-501411d
+33846ec

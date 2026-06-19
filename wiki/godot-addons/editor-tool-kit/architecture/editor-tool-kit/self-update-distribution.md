@@ -42,4 +42,4 @@ Open the **Editor Tool Kit** tab and press **Check all** (or leave *Check for up
 - A managed addon carries NO update machinery of its own — only an [update] marker in its plugin.cfg. etk is the package manager, so a managed addon requires etk vendored + enabled alongside it.
 
 ## Synced commit
-501411d
+33846ec

@@ -1,6 +1,6 @@
 {
   "ws:mql353ht-01pe-yb8909": {
-    "version": 460,
+    "version": 463,
     "files": {
       "godot-addons/editor-tool-kit/index.md": "6f3160bb7496bbf110a51a4ccd7cf9c5025fd3cd550f875952cbdadc3b566cef",
       "godot-addons/ui-kit/index.md": "9c2ca18b9a8d4c42faec03e147e0afcee6c5672db0d8f10fff1d9054bedd6dcc",
@@ -13,10 +13,10 @@
       "godot-addons/editor-tool-kit/usage/getting-started-install-enable.md": "e74fb5d7155e8cee16e394d1fd29e9ddc0809f03ed9bb1695ebd6d046eca1ae9",
       "godot-addons/editor-tool-kit/usage/authoring-a-new-tool-the-three-piece-recipe.md": "ed40d1ef451ae30bb6021414f303472070d75a4f7f8d66b1c1a045db9d17e1e4",
       "godot-addons/editor-tool-kit/usage/releasing-self-update.md": "2f33ad56899fd796c13a374f48a36a4d28f7ae819f601906818ee2b70bde305a",
-      "godot-addons/editor-tool-kit/architecture/editor-tool-kit/index.md": "4af1be08c9184f5eb8d3ae0e2c68685e00624faec5c9c38f8c916b019b0412eb",
+      "godot-addons/editor-tool-kit/architecture/editor-tool-kit/index.md": "373fc4ddafd2a42a3e8690e97dd7d54b0c86697f0e1619fb15260a8dbe1d675f",
       "godot-addons/editor-tool-kit/adrs/adr-1-tool-logic-lives-in-a-headless-testable-toolservice-the-editor-view-is-optional.md": "9da740368b3036ae82af89c3795669cd2ee13688205ab237faeabd967cd68aa8",
       "godot-addons/editor-tool-kit/architecture/editor-tool-kit/editortoolplugin.md": "183a7c7ab09fea922d02ba854e7893163b73ca0e1cc427b89aef60446fdfec6a",
-      "godot-addons/ui-kit/architecture/ui-kit/index.md": "6a5cf87daa0d8b24ca842dd47bdd6cb89dcdf6ed642e119e8418a076c1895480",
+      "godot-addons/ui-kit/architecture/ui-kit/index.md": "ff9361480f5324a9baf42cbcb38c44087b46c9dec2abc85e4eaa34079c3725a2",
       "godot-addons/editor-tool-kit/architecture/editor-tool-kit/toolservice.md": "fc67bdd2518335160f63d4655d0bf60d984d261b72b57213f2da34849dfb2c8d",
       "godot-addons/editor-tool-kit/architecture/editor-tool-kit/contentstore.md": "879d77f0fe487630afa86753ec8e5ce4bcfae7774a51b7f3953fd407e959dcb4",
       "godot-addons/editor-tool-kit/architecture/editor-tool-kit/editortoolui.md": "56febe34b1ad54ecc6283f8c178775d485c5b0f4cbdd5a5a4ba70e5008b006e6",
@@ -27,7 +27,7 @@
       "godot-addons/editor-tool-kit/architecture/editor-tool-kit/bridgeserver.md": "e1ea41f6122bf731ec7f9ae9f9d0b6f12eca51b5ffbc27d525839d58af830a72",
       "godot-addons/ui-kit/architecture/ui-kit/uistate.md": "ef094d7a80387d53687f3a695e169f2d686fb32dcea7a6dfaa244950ea8b5de1",
       "godot-addons/ui-kit/usage/wiring-a-ui-router-scaffold-registration.md": "d5de2355d5f240ec69cd261ebac018803b486337df2289c77323a86b50f800b9",
-      "godot-addons/editor-tool-kit/architecture/editor-tool-kit/self-update-distribution.md": "6971fd3c72f010da5b7000ae13345442df69d51ed4b0379865e33ed79ef8c21f",
+      "godot-addons/editor-tool-kit/architecture/editor-tool-kit/self-update-distribution.md": "bfd9110aa5592b9a271e6b9d9ccb2046b41ba38abcbda17a0ba7306deecab1a0",
       "godot-addons/ui-kit/architecture/ui-kit/uiscreenscaffold.md": "7b867b7689ee5bf35aea49132161002b738c63272ff946f64bde7181552b9b34",
       "godot-addons/editor-tool-kit/adrs/adr-3-editortoolplugin-is-the-composition-root-that-constructs-and-injects-the-pieces.md": "368139e8bc8b0a19ecee703421b90661c2bde07e7e567f7738d8057d72ddbecf",
       "godot-addons/editor-tool-kit/adrs/adr-4-style-via-one-theme-cascaded-from-the-panel-root-not-per-dock-styling.md": "f254ad1c275e8590b662a823701d52678e27b9549ec906c88f04fc5427d82793",
