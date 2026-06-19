@@ -10,7 +10,7 @@ extends EditorPlugin
 ## This EditorPlugin itself does ONE editor-side job: mount a small "UI Kit" dock
 ## that checks the source repo (github.com/thegoldenmule/godot-addons) for a newer
 ## version and pulls it in place — the same self-update convention as godot-ai and
-## godot-editor-tk. It does NOT register the autoloads (the project chooses their
+## the sibling editor_tool_kit addon. It does NOT register the autoloads (the project chooses their
 ## names); see addons/ui_kit/README.md for the wiring recipe.
 
 const UpdateServiceT := preload("res://addons/ui_kit/update/update_service.gd")
