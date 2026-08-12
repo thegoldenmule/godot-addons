@@ -328,6 +328,7 @@ func _next_stage(paths: Dictionary = {}) -> void:
 			"title": "Uploaded to App Store Connect" if was_upload else "Signed .ipa exported",
 			"guidance": ("TestFlight will show the build under Processing for a few minutes — use 'TestFlight status' to poll it."
 				if was_upload else "The .ipa is in %s." % paths["dir"]),
+			"links": ([{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}] if was_upload else []),
 		})
 		return
 	var stage: Dictionary = _stages.pop_front()
@@ -435,16 +436,17 @@ func refresh_preflight() -> void:
 	preflight_changed.emit(rows)
 
 
-static func _row(id: String, label: String, status: String, detail := "", guidance := "", fixable := false) -> Dictionary:
+static func _row(id: String, label: String, status: String, detail := "", guidance := "", fixable := false, links: Array = []) -> Dictionary:
 	return {"id": id, "label": label, "status": status, "detail": detail,
-		"guidance": guidance, "fixable": fixable}
+		"guidance": guidance, "fixable": fixable, "links": links}
 
 
 func _check_xcode() -> Dictionary:
 	var r: Dictionary = Exec.run(PackedStringArray(["xcodebuild", "-version"]))
 	if int(r["code"]) != 0:
 		return _row("xcode", "Xcode", "fail", "",
-			"Install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app")
+			"Install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app",
+			false, [{"label": "Xcode on the App Store", "url": "https://apps.apple.com/app/xcode/id497799835"}])
 	return _row("xcode", "Xcode", "ok", str(r["output"]).split("\n")[0].strip_edges())
 
 
@@ -496,7 +498,8 @@ func _check_account() -> Dictionary:
 	if int(r["code"]) != 0 or teams.is_empty():
 		var status := "warn" if has_asc_key() else "fail"
 		return _row("account", "Xcode account", status, "no signed-in teams",
-			"Sign into Xcode (Xcode → Settings → Accounts → ＋). Not needed once an ASC API key is configured — cloud signing then works headless.")
+			"Sign into Xcode (Xcode → Settings → Accounts → ＋). Not needed once an ASC API key is configured — cloud signing then works headless.",
+			false, [{"label": "Apple Developer account", "url": "https://developer.apple.com/account"}])
 	return _row("account", "Xcode account", "ok", "teams: " + ", ".join(teams))
 
 
@@ -504,7 +507,8 @@ func _check_asc_key() -> Dictionary:
 	var c := asc_credentials()
 	if c["key_id"] == "" or c["issuer_id"] == "" or c["key_path"] == "":
 		return _row("asc_key", "App Store Connect API key", "warn", "not configured",
-			"Optional but recommended (headless auth + proactive app-record checks + TestFlight polling):\n1. appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API → Team Keys → ＋ (role: App Manager)\n2. Download the .p8 (downloadable exactly once)\n3. Put asc_key_id, asc_issuer_id, asc_key_path in build_kit.config.json (or ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the repo .env)")
+			"Optional but recommended (headless auth + proactive app-record checks + TestFlight polling):\n1. Users and Access → Integrations → App Store Connect API → Team Keys → ＋ (role: App Manager)\n2. Download the .p8 (downloadable exactly once)\n3. Put asc_key_id, asc_issuer_id, asc_key_path in build_kit.config.json (or ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the repo .env)",
+			false, [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}])
 	if not FileAccess.file_exists(c["key_path"]):
 		return _row("asc_key", "App Store Connect API key", "fail", c["key_path"],
 			"asc_key_path points at a missing file — fix the path to the downloaded AuthKey_%s.p8." % c["key_id"])
@@ -522,7 +526,8 @@ func _check_app_record() -> Dictionary:
 	if not has_asc_key():
 		return _row("app_record", "App Store Connect app record", "warn",
 			"unknown (no API key)",
-			"Without an API key this is only verified at upload time — the upload error will carry the create-app steps if the record is missing.")
+			"Without an API key this is only verified at upload time — the upload error will carry the create-app steps if the record is missing.",
+			false, [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
 	if _asc_proc.is_empty():
 		_asc_proc = _spawn_asc("check-app", preset["bundle_id"], "asc_check_app.log")
 		_asc_started_ms = Time.get_ticks_msec()
@@ -586,15 +591,17 @@ func _poll_asc() -> void:
 		_set_row("app_record", "ok", name)
 	else:
 		_set_row("app_record", "fail", "missing for " + bundle,
-			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. appstoreconnect.apple.com → My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown (already registered by signing)\n4. SKU: any internal id. Then Refresh." % bundle)
+			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown (already registered by signing)\n4. SKU: any internal id. Then Refresh." % bundle,
+			[{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
 
 
-func _set_row(id: String, status: String, detail: String, guidance := "") -> void:
+func _set_row(id: String, status: String, detail: String, guidance := "", links: Array = []) -> void:
 	for row in preflight_rows:
 		if row["id"] == id:
 			row["status"] = status
 			row["detail"] = detail
 			row["guidance"] = guidance
+			row["links"] = links
 	preflight_changed.emit(preflight_rows)
 
 

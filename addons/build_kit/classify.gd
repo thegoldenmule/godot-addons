@@ -16,7 +16,8 @@ static func rules() -> Array:
 			"id": "missing_app_record",
 			"patterns": ["DistributionAppRecordProviderError.missingApp", "Error Downloading App Information"],
 			"title": "No App Store Connect app record for this bundle id",
-			"guidance": "App creation is not in Apple's public API — this is a one-time manual step (~2 min):\n1. Open https://appstoreconnect.apple.com → My Apps → ＋ → New App\n2. Platform: iOS. Name: must be unique across the App Store.\n3. Bundle ID: pick {bundle_id} from the dropdown (already registered — signing did that).\n4. SKU: any internal id. Then press the build button again.",
+			"guidance": "App creation is not in Apple's public API — this is a one-time manual step (~2 min):\n1. Open App Store Connect → My Apps → ＋ → New App\n2. Platform: iOS. Name: must be unique across the App Store.\n3. Bundle ID: pick {bundle_id} from the dropdown (already registered — signing did that).\n4. SKU: any internal id. Then press the build button again.",
+			"links": [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}],
 		},
 		{
 			"id": "signing_conflict",
@@ -29,12 +30,14 @@ static func rules() -> Array:
 			"patterns": ["No Accounts", "Your session has expired", "No Apple ID", "requires a development team", "Signing for \"", "No signing certificate"],
 			"title": "No usable Apple account / team for signing",
 			"guidance": "Either sign into Xcode (Xcode → Settings → Accounts → ＋, then select team {team_id}) or configure an App Store Connect API key in build_kit.config.json (asc_key_id / asc_issuer_id / asc_key_path) — the API key also works headless and never expires like a login session.",
+			"links": [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 		},
 		{
 			"id": "no_profiles",
 			"patterns": ["No profiles for", "doesn't include signing certificate", "Provisioning profile", "profile doesn't match"],
 			"title": "Provisioning profile problem",
 			"guidance": "With automatic signing + -allowProvisioningUpdates this should self-heal on retry. If it persists: check the bundle id {bundle_id} is registered to team {team_id} at developer.apple.com → Identifiers, and that any special capabilities are enabled on the App ID there first.",
+			"links": [{"label": "Open Identifiers", "url": "https://developer.apple.com/account/resources/identifiers/list"}],
 		},
 		{
 			"id": "no_export_templates",
@@ -47,6 +50,7 @@ static func rules() -> Array:
 			"patterns": ["Failed to authenticate", "authentication credentials", "NOT_AUTHORIZED", "401"],
 			"title": "App Store Connect authentication failed",
 			"guidance": "The configured API key was rejected. Re-check asc_key_id, asc_issuer_id and that asc_key_path points at the downloaded .p8 (App Store Connect → Users and Access → Integrations). The key needs the App Manager (or Developer) role.",
+			"links": [{"label": "Open Integrations", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 		},
 		{
 			"id": "network",
@@ -69,8 +73,9 @@ static func rules() -> Array:
 	]
 
 
-## Returns {id, title, guidance} — falls back to a generic entry when nothing
-## matches, so callers always get something presentable.
+## Returns {id, title, guidance, links} — falls back to a generic entry when
+## nothing matches, so callers always get something presentable. `links` is an
+## Array of {label, url} the dock renders as open-in-browser buttons.
 static func classify(log_text: String, context: Dictionary = {}) -> Dictionary:
 	for rule in rules():
 		for p in rule["patterns"]:
@@ -79,11 +84,13 @@ static func classify(log_text: String, context: Dictionary = {}) -> Dictionary:
 					"id": rule["id"],
 					"title": rule["title"],
 					"guidance": _fill(rule["guidance"], context),
+					"links": rule.get("links", []),
 				}
 	return {
 		"id": "unknown",
 		"title": "Build step failed",
 		"guidance": "No known failure signature matched — read the tail of the log above for the first 'error:' line.",
+		"links": [],
 	}
 
 

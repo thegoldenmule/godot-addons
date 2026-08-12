@@ -14,6 +14,7 @@ var service: Node
 
 var _rows_box: VBoxContainer
 var _status: Label
+var _status_links: HBoxContainer
 var _log: TextEdit
 var _btn_testflight: Button
 var _btn_ipa: Button
@@ -57,6 +58,9 @@ func _ready() -> void:
 	var build_col := VBoxContainer.new()
 	build_col.add_child(Ui.button_bar([_btn_testflight, _btn_ipa, _btn_cancel, _btn_tf_status]))
 	build_col.add_child(_status)
+	_status_links = HBoxContainer.new()
+	_status_links.add_theme_constant_override("separation", Pal.SEP)
+	build_col.add_child(_status_links)
 	right.add_child(Ui.section("Build iOS", build_col))
 
 	_log = TextEdit.new()
@@ -132,6 +136,21 @@ func _on_build_finished(result: Dictionary) -> void:
 	else:
 		_status.text = "✗ %s — %s" % [result.get("title", "Failed"), result.get("guidance", "")]
 		_status.add_theme_color_override("font_color", Pal.ERROR)
+	_fill_links(_status_links, result.get("links", []))
+
+
+## Repopulate `bar` with open-in-browser buttons for [{label, url}, …].
+func _fill_links(bar: HBoxContainer, links: Array) -> void:
+	for child in bar.get_children():
+		child.queue_free()
+	for link in links:
+		bar.add_child(Ui.button("↗ " + str(link.get("label", "Open")),
+			_open_url.bind(str(link.get("url", ""))), str(link.get("url", ""))))
+
+
+func _open_url(url: String) -> void:
+	if url != "":
+		OS.shell_open(url)
 
 
 # ── Preflight rendering ───────────────────────────────────────────────────────
@@ -178,14 +197,21 @@ func _make_row(row: Dictionary) -> Control:
 		line.add_child(Ui.button("Fix", _on_fix.bind(str(row["id"]))))
 	box.add_child(line)
 
-	if str(row["status"]) != "ok" and str(row.get("guidance", "")) != "":
-		# Editor-default font size on purpose: a shrunken caption size is
-		# unreadable on hi-DPI — the dim color alone marks it as secondary.
-		var guide := Label.new()
-		guide.text = str(row["guidance"])
-		guide.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		guide.add_theme_color_override("font_color", Pal.CAPTION)
-		box.add_child(guide)
+	if str(row["status"]) != "ok":
+		if str(row.get("guidance", "")) != "":
+			# Editor-default font size on purpose: a shrunken caption size is
+			# unreadable on hi-DPI — the dim color alone marks it as secondary.
+			var guide := Label.new()
+			guide.text = str(row["guidance"])
+			guide.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			guide.add_theme_color_override("font_color", Pal.CAPTION)
+			box.add_child(guide)
+		var links: Array = row.get("links", [])
+		if not links.is_empty():
+			var bar := HBoxContainer.new()
+			bar.add_theme_constant_override("separation", Pal.SEP)
+			_fill_links(bar, links)
+			box.add_child(bar)
 	return box
 
 

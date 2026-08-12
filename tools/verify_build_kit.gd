@@ -64,6 +64,8 @@ func _initialize() -> void:
 	_check("classify signing conflict", conflict["id"] == "signing_conflict")
 	var generic := Classify.classify("something entirely novel")
 	_check("classify fallback", generic["id"] == "unknown")
+	_check("classify links passthrough", str(missing.get("links", [])).contains("appstoreconnect.apple.com/apps"), str(missing))
+	_check("classify fallback links empty", (generic.get("links", [1]) as Array).is_empty())
 	var order := Classify.classify("error: exportArchive Error Downloading App Information\n** EXPORT FAILED **")
 	_check("classify specific beats generic", order["id"] == "missing_app_record", str(order))
 
