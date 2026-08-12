@@ -23,6 +23,8 @@ var _btn_tf_status: Button
 var _p8_dialog: EditorFileDialog
 var _issuer_text := ""   # survives preflight-row rebuilds (rows re-render on refresh)
 var _bundle_text := ""   # ditto, for the create-preset form
+var _teams: Array = []   # [{id, name}] from the service, refreshed with the rows
+var _selected_team := "" # ditto-persistent team-picker choice
 
 
 func _ready() -> void:
@@ -169,6 +171,9 @@ func _open_url(url: String) -> void:
 # ── Preflight rendering ───────────────────────────────────────────────────────
 
 func _on_preflight_changed(rows: Array) -> void:
+	_teams = service.list_teams()
+	if _selected_team == "" and not _teams.is_empty():
+		_selected_team = str(_teams[0]["id"])
 	for child in _rows_box.get_children():
 		child.queue_free()
 	for row in rows:
@@ -227,13 +232,37 @@ func _make_row(row: Dictionary) -> Control:
 			box.add_child(bar)
 		if str(row["id"]) == "asc_key":
 			box.add_child(_make_asc_key_form())
-		if str(row["id"]) == "preset" and str(row["status"]) == "fail":
-			box.add_child(_make_preset_form())
+		if str(row["id"]) == "preset":
+			if str(row["status"]) == "fail":
+				box.add_child(_make_preset_form())
+			elif bool(row.get("fixable", false)) and _teams.size() > 1:
+				# The Fix needs a team choice — put the picker right here.
+				box.add_child(_make_team_picker())
 	return box
 
 
-## Create-preset mini-form: a bundle-id field (prefilled from the project name)
-## and a Create button — the service writes the whole preset itself.
+## Dropdown of the signed-in Xcode teams ("Name (ID)"); the selection feeds
+## both the preset Fix and the create-preset form.
+func _make_team_picker() -> OptionButton:
+	var picker := OptionButton.new()
+	for i in _teams.size():
+		var team: Dictionary = _teams[i]
+		var label := "%s (%s)" % [team["name"], team["id"]] if str(team["name"]) != "" else str(team["id"])
+		picker.add_item(label, i)
+		if str(team["id"]) == _selected_team:
+			picker.select(i)
+	picker.item_selected.connect(_on_team_selected)
+	return picker
+
+
+func _on_team_selected(index: int) -> void:
+	if index >= 0 and index < _teams.size():
+		_selected_team = str(_teams[index]["id"])
+
+
+## Create-preset mini-form: a bundle-id field (prefilled from the project
+## name), the team picker when several teams are signed in, and a Create
+## button — the service writes the whole preset itself.
 func _make_preset_form() -> Control:
 	if _bundle_text == "":
 		_bundle_text = service.default_bundle_id()
@@ -245,6 +274,8 @@ func _make_preset_form() -> Control:
 	bundle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bundle.text_changed.connect(_on_bundle_changed)
 	row.add_child(bundle)
+	if _teams.size() > 1:
+		row.add_child(_make_team_picker())
 	row.add_child(Ui.button("Create preset", _on_create_preset))
 	return row
 
@@ -254,7 +285,7 @@ func _on_bundle_changed(text: String) -> void:
 
 
 func _on_create_preset() -> void:
-	_show_result(service.create_ios_preset(_bundle_text))
+	_show_result(service.create_ios_preset(_bundle_text, _selected_team))
 
 
 ## The ASC-key ingest mini-form: Browse for (or drop) the downloaded .p8, and
@@ -324,7 +355,7 @@ func _show_result(result: Dictionary) -> void:
 
 
 func _on_fix(id: String) -> void:
-	var result: Dictionary = service.apply_fix(id)
+	var result: Dictionary = service.apply_fix(id, {"team_id": _selected_team} if id == "preset" else {})
 	_status.text = str(result.get("message", result.get("error", "")))
 	_status.add_theme_color_override("font_color",
 		Pal.TEXT if result.get("ok", false) else Pal.ERROR)

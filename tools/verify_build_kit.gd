@@ -160,14 +160,20 @@ func _initialize() -> void:
 	var tmp_preset := "user://verify_build_kit_presets.cfg"
 	if FileAccess.file_exists(tmp_preset):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(tmp_preset))
-	var created: Dictionary = svc2.create_ios_preset("com.example.verify", tmp_preset)
+	var created: Dictionary = svc2.create_ios_preset("com.example.verify", "TEAMPICKED1", tmp_preset)
 	_check("create preset ok", created.get("ok", false), str(created))
 	var created_text := FileAccess.open(tmp_preset, FileAccess.READ).get_as_text() if FileAccess.file_exists(tmp_preset) else ""
 	var reparsed := ServiceT.parse_ios_preset_text(created_text)
 	_check("created preset parses", reparsed.get("bundle_id", "") == "com.example.verify", created_text.left(200))
 	_check("created preset project-only", reparsed.get("export_project_only", false) == true)
-	_check("create rejects bad bundle", not svc2.create_ios_preset("nodots", tmp_preset).get("ok", true))
+	_check("created preset picked team", reparsed.get("team_id", "") == "TEAMPICKED1", created_text.left(200))
+	_check("create rejects bad bundle", not svc2.create_ios_preset("nodots", "", tmp_preset).get("ok", true))
 	svc2.free()
+
+	# team entries (id + display name, deduped)
+	var entries := ServiceT.parse_team_entries("{\n  teamID = AAA1111111;\n  teamName = \"Studio LLC\";\n  teamID = BBB2222222;\n  teamName = Personal;\n  teamID = AAA1111111;\n")
+	_check("team entries parsed", entries.size() == 2, str(entries))
+	_check("team entry names", entries.size() == 2 and str(entries[0]["name"]) == "Studio LLC" and str(entries[1]["name"]) == "Personal", str(entries))
 
 	# legacy-config migration (the decision half; the write half touches disk)
 	var legacy := {"preset": "iOS", "build_number": 3, "asc_key_id": "K1", "asc_issuer_id": "I1",

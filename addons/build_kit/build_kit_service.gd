@@ -678,7 +678,7 @@ func _check_preset() -> Dictionary:
 	var preset := load_ios_preset()
 	if preset.is_empty():
 		return _row("preset", "iOS export preset", "fail", "",
-			"1. Enter the bundle id below (reverse-DNS, e.g. com.studio.game)\n2. Press Create preset.")
+			"1. Enter the bundle id below (reverse-DNS, e.g. com.studio.game)\n2. Pick your team\n3. Press Create preset.")
 	var problems := PackedStringArray()
 	if not preset["export_project_only"]:
 		problems.append("export_project_only is off")
@@ -689,18 +689,44 @@ func _check_preset() -> Dictionary:
 		return _row("preset", "iOS export preset", "ok", detail)
 	return _row("preset", "iOS export preset", "warn",
 		detail + " (" + ", ".join(problems) + ")",
-		"Fix writes export_project_only=true and fills the Team ID from your signed-in Xcode account.", true)
+		"1. Pick your team below\n2. Press Fix.", true)
 
 
 static func parse_teams(defaults_output: String) -> PackedStringArray:
 	var teams := PackedStringArray()
+	for entry in parse_team_entries(defaults_output):
+		if not teams.has(str(entry["id"])):
+			teams.append(str(entry["id"]))
+	return teams
+
+
+static func _plist_value(line: String) -> String:
+	return line.get_slice("=", 1).strip_edges().trim_suffix(";").strip_edges().trim_prefix("\"").trim_suffix("\"")
+
+
+## Teams with their display names, in Xcode's order: [{id, name}, …]. The
+## defaults blocks list teamID before teamName, so a name attaches to the most
+## recent id.
+static func parse_team_entries(defaults_output: String) -> Array:
+	var entries: Array = []
+	var seen := {}
 	for line in defaults_output.split("\n"):
 		var s := line.strip_edges()
 		if s.begins_with("teamID"):
-			var value := s.get_slice("=", 1).strip_edges().trim_suffix(";").strip_edges().trim_prefix("\"").trim_suffix("\"")
-			if value != "" and not teams.has(value):
-				teams.append(value)
-	return teams
+			var id := _plist_value(s)
+			if id != "" and not seen.has(id):
+				seen[id] = true
+				entries.append({"id": id, "name": ""})
+		elif s.begins_with("teamName") and not entries.is_empty():
+			if str(entries[-1]["name"]) == "":
+				entries[-1]["name"] = _plist_value(s)
+	return entries
+
+
+## The dock's team-picker source.
+func list_teams() -> Array:
+	var r: Dictionary = Exec.run(PackedStringArray(["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))
+	return parse_team_entries(str(r["output"]))
 
 
 func _check_account() -> Dictionary:
@@ -863,7 +889,7 @@ static func clean_app_name() -> String:
 ## xcodebuild), signing fields untouched (xcodebuild owns signing), team id
 ## auto-filled when exactly one Xcode team is signed in. `path` is overridable
 ## so the verifier can exercise this without touching the project.
-func create_ios_preset(bundle_id: String, path := "res://export_presets.cfg") -> Dictionary:
+func create_ios_preset(bundle_id: String, team_id := "", path := "res://export_presets.cfg") -> Dictionary:
 	bundle_id = bundle_id.strip_edges()
 	if not valid_bundle_id(bundle_id):
 		return err("Bundle id must be reverse-DNS, e.g. com.studio.game.")
@@ -892,11 +918,15 @@ func create_ios_preset(bundle_id: String, path := "res://export_presets.cfg") ->
 	cfg.set_value(opt, "application/short_version", "1.0")
 	cfg.set_value(opt, "application/version", "1.0")
 	var msg := "iOS preset created (%s)" % bundle_id
-	var teams := parse_teams(str(Exec.run(PackedStringArray(
-		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
-	if teams.size() == 1:
-		cfg.set_value(opt, "application/app_store_team_id", teams[0])
-		msg += ", team " + teams[0]
+	if team_id != "":
+		cfg.set_value(opt, "application/app_store_team_id", team_id)
+		msg += ", team " + team_id
+	else:
+		var teams := parse_teams(str(Exec.run(PackedStringArray(
+			["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
+		if teams.size() == 1:
+			cfg.set_value(opt, "application/app_store_team_id", teams[0])
+			msg += ", team " + teams[0]
 	if cfg.save(path) != OK:
 		return err("Cannot write %s." % path)
 	if path == "res://export_presets.cfg":
@@ -969,10 +999,10 @@ func set_asc_issuer(issuer: String) -> Dictionary:
 ## The preset fix: writes export_project_only=true and, when the preset has no
 ## Team ID, fills it from the signed-in Xcode account (only when exactly one
 ## team is available — with several, choosing is the user's call).
-func apply_fix(id: String) -> Dictionary:
+func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 	match id:
 		"preset":
-			return _fix_preset()
+			return _fix_preset(str(opts.get("team_id", "")))
 		"templates":
 			return _fix_templates()
 	return err("No fix for '%s'." % id)
@@ -1024,26 +1054,27 @@ func _poll_fix() -> void:
 	refresh_preflight()
 
 
-func _fix_preset() -> Dictionary:
+func _fix_preset(team_id := "") -> Dictionary:
 	var preset := load_ios_preset()
 	if preset.is_empty():
-		return err("No iOS preset to fix — create one in Project → Export first.")
+		return err("No iOS preset to fix — create one with the form below first.")
 	var cfg := ConfigFile.new()
 	if cfg.load("res://export_presets.cfg") != OK:
 		return err("Cannot parse export_presets.cfg.")
 	var opt: String = preset["section"] + ".options"
 	cfg.set_value(opt, "application/export_project_only", true)
 	var msg := "export_project_only=true"
-	if preset["team_id"] == "":
-		var r: Dictionary = Exec.run(PackedStringArray(["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))
-		var teams := parse_teams(str(r["output"]))
+	if team_id != "":
+		cfg.set_value(opt, "application/app_store_team_id", team_id)
+		msg += ", team_id=" + team_id
+	elif preset["team_id"] == "":
+		var teams := parse_teams(str(Exec.run(PackedStringArray(
+			["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
 		if teams.size() == 1:
 			cfg.set_value(opt, "application/app_store_team_id", teams[0])
 			msg += ", team_id=" + teams[0]
-		elif teams.size() > 1:
-			msg += " — several teams signed in (%s): set application/app_store_team_id yourself in Project → Export" % ", ".join(teams)
 		else:
-			msg += " — no signed-in team found: set application/app_store_team_id yourself"
+			msg += " — pick a team in the dropdown and press Fix again"
 	if cfg.save("res://export_presets.cfg") != OK:
 		return err("Cannot write export_presets.cfg.")
 	mark_dirty()
