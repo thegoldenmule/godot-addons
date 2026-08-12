@@ -80,6 +80,9 @@ func load_config() -> Dictionary:
 					config[key].merge(parsed[key], true)
 				else:
 					config[key] = parsed[key]
+	# JSON numbers parse as floats; keep the build number an int so it
+	# round-trips as one (CFBundleVersion "2", not "2.0").
+	config["ios"]["build_number"] = int(config["ios"].get("build_number", 1))
 	return config
 
 
@@ -429,6 +432,7 @@ func refresh_preflight() -> void:
 	rows.append(_check_templates())
 	rows.append(_check_preset())
 	rows.append(_check_account())
+	rows.append(_check_dist_cert())
 	rows.append(_check_asc_key())
 	rows.append(_check_app_record())
 	rows.append(_check_devices())
@@ -501,6 +505,15 @@ func _check_account() -> Dictionary:
 			"Sign into Xcode (Xcode → Settings → Accounts → ＋). Not needed once an ASC API key is configured — cloud signing then works headless.",
 			false, [{"label": "Apple Developer account", "url": "https://developer.apple.com/account"}])
 	return _row("account", "Xcode account", "ok", "teams: " + ", ".join(teams))
+
+
+func _check_dist_cert() -> Dictionary:
+	var r: Dictionary = Exec.run(PackedStringArray(["security", "find-identity", "-v", "-p", "codesigning"]))
+	var out := str(r["output"])
+	if out.contains("Apple Distribution") or out.contains("iOS Distribution"):
+		return _row("dist_cert", "Distribution certificate", "ok", "in keychain")
+	return _row("dist_cert", "Distribution certificate", "warn", "not in keychain",
+		"Needed by the upload step (API-key auth doesn't get the cloud-managed cert a logged-in Xcode session would). One-time, 3 clicks:\n1. Xcode → Settings → Accounts → select your team\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Refresh here.")
 
 
 func _check_asc_key() -> Dictionary:
