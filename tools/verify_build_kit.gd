@@ -109,6 +109,15 @@ func _initialize() -> void:
 	# config defaults
 	_check("default config", int(ServiceT.default_config()["ios"]["build_number"]) == 1)
 
+	# ASC key ingest
+	_check("key id from filename", ServiceT.parse_key_id_from_filename("/d/AuthKey_ABC123DEFG.p8") == "ABC123DEFG")
+	_check("key id rejects other names", ServiceT.parse_key_id_from_filename("/d/key.p8") == "")
+	_check("key id rejects too short", ServiceT.parse_key_id_from_filename("/d/AuthKey_AB.p8") == "")
+	var svc: Node = ServiceT.new()
+	_check("issuer rejects junk", not svc.set_asc_issuer("abc").get("ok", true))
+	_check("issuer rejects empty", not svc.set_asc_issuer("").get("ok", true))
+	svc.free()
+
 	# real spawn round-trip (log + exit sentinel)
 	var log_path := OS.get_cache_dir().path_join("build_kit_verify").path_join("spawn.log")
 	var handle := Exec.spawn_shell("echo hello; exit 7", log_path)

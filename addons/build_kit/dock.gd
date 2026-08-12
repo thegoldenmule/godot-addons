@@ -20,6 +20,8 @@ var _btn_testflight: Button
 var _btn_ipa: Button
 var _btn_cancel: Button
 var _btn_tf_status: Button
+var _p8_dialog: EditorFileDialog
+var _issuer_text := ""   # survives preflight-row rebuilds (rows re-render on refresh)
 
 
 func _ready() -> void:
@@ -68,6 +70,10 @@ func _ready() -> void:
 	_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_log.custom_minimum_size = Vector2(0, 160)
 	right.add_child(Ui.section("Log", _log, true))
+
+	# OS-level file drop (the whole editor window fires this; we act only while
+	# this panel is visible and only on .p8 files — the ASC-key ingest path).
+	get_window().files_dropped.connect(_on_files_dropped)
 
 	if service != null:
 		service.preflight_changed.connect(_on_preflight_changed)
@@ -212,7 +218,75 @@ func _make_row(row: Dictionary) -> Control:
 			bar.add_theme_constant_override("separation", Pal.SEP)
 			_fill_links(bar, links)
 			box.add_child(bar)
+		if str(row["id"]) == "asc_key":
+			box.add_child(_make_asc_key_form())
 	return box
+
+
+## The ASC-key ingest mini-form: Browse for (or drop) the downloaded .p8, and
+## an Issuer ID paste field. Rendered under the asc_key row until it's green.
+func _make_asc_key_form() -> Control:
+	var col := VBoxContainer.new()
+	var row1 := HBoxContainer.new()
+	row1.add_theme_constant_override("separation", Pal.SEP)
+	row1.add_child(Ui.button("Browse for .p8…", _on_browse_p8,
+		"Pick the downloaded AuthKey_<KEYID>.p8 — key id and path are extracted from it"))
+	var hint := Label.new()
+	hint.text = "…or drop the file anywhere on this panel"
+	hint.add_theme_color_override("font_color", Pal.TEXT_DIM)
+	row1.add_child(hint)
+	col.add_child(row1)
+
+	var row2 := HBoxContainer.new()
+	row2.add_theme_constant_override("separation", Pal.SEP)
+	var issuer := LineEdit.new()
+	issuer.placeholder_text = "Issuer ID (Copy button at the top of the API-keys page)"
+	issuer.text = _issuer_text
+	issuer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	issuer.text_changed.connect(_on_issuer_changed)
+	row2.add_child(issuer)
+	row2.add_child(Ui.button("Save", _on_save_issuer))
+	col.add_child(row2)
+	return col
+
+
+func _on_issuer_changed(text: String) -> void:
+	_issuer_text = text
+
+
+func _on_save_issuer() -> void:
+	_show_result(service.set_asc_issuer(_issuer_text))
+
+
+func _on_browse_p8() -> void:
+	if _p8_dialog == null:
+		_p8_dialog = EditorFileDialog.new()
+		_p8_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_FILE
+		_p8_dialog.access = EditorFileDialog.ACCESS_FILESYSTEM
+		_p8_dialog.add_filter("*.p8", "App Store Connect API key")
+		_p8_dialog.current_dir = OS.get_environment("HOME").path_join("Downloads")
+		_p8_dialog.file_selected.connect(_on_p8_selected)
+		add_child(_p8_dialog)
+	_p8_dialog.popup_centered_ratio(0.5)
+
+
+func _on_p8_selected(path: String) -> void:
+	_show_result(service.adopt_asc_key(path))
+
+
+func _on_files_dropped(files: PackedStringArray) -> void:
+	if not is_visible_in_tree():
+		return
+	for file in files:
+		if file.ends_with(".p8"):
+			_show_result(service.adopt_asc_key(file))
+			return
+
+
+func _show_result(result: Dictionary) -> void:
+	_status.text = str(result.get("message", result.get("error", "")))
+	_status.add_theme_color_override("font_color",
+		Pal.TEXT if result.get("ok", false) else Pal.ERROR)
 
 
 func _on_fix(id: String) -> void:

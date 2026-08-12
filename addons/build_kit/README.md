@@ -52,10 +52,14 @@ preset's signing fields stay **empty** and no secret ever lands in
    identifier set. Leave signing fields empty. Run the preflight **Fix** to
    set `export_project_only` + Team ID.
 3. Optional but recommended — an **App Store Connect API key** (headless auth,
-   proactive app-record checks, TestFlight status polling): App Store Connect →
-   Users and Access → Integrations → Team Keys (role: App Manager), then put
-   the values in `res://build_kit.config.json` (project root, NOT inside the
-   addon — self-update overwrites this folder):
+   proactive app-record checks, TestFlight status polling). The preflight row
+   walks you through it: click **↗ Create API key** (＋ → role: App Manager →
+   Generate → Download), then **drop the downloaded `.p8` on the panel** (or
+   Browse…) — the key id and path are extracted from Apple's
+   `AuthKey_<KEYID>.p8` filename and the file is copied to `~/private_keys/`
+   (chmod 600, outside any repo) — and paste the **Issuer ID** from the top of
+   that page into the field. All of that lands in `res://build_kit.config.json`
+   (project root, NOT inside the addon — self-update overwrites this folder):
 
 ```json
 {

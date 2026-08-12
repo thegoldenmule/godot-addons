@@ -505,13 +505,20 @@ func _check_account() -> Dictionary:
 
 func _check_asc_key() -> Dictionary:
 	var c := asc_credentials()
-	if c["key_id"] == "" or c["issuer_id"] == "" or c["key_path"] == "":
+	var links := [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}]
+	if c["key_id"] == "" and c["key_path"] == "":
 		return _row("asc_key", "App Store Connect API key", "warn", "not configured",
-			"Optional but recommended (headless auth + proactive app-record checks + TestFlight polling):\n1. Users and Access → Integrations → App Store Connect API → Team Keys → ＋ (role: App Manager)\n2. Download the .p8 (downloadable exactly once)\n3. Put asc_key_id, asc_issuer_id, asc_key_path in build_kit.config.json (or ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the repo .env)",
-			false, [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}])
-	if not FileAccess.file_exists(c["key_path"]):
+			"Recommended (headless auth, proactive app-record checks, TestFlight polling). Three clicks:\n1. ↗ Create API key → ＋ → any name, role: App Manager → Generate\n2. Download the .p8 (downloadable exactly once), then drop it on this panel — or Browse… — and the key id + path are extracted automatically\n3. Copy the Issuer ID from the top of that same page into the field below and Save",
+			false, links)
+	if c["key_path"] == "" or not FileAccess.file_exists(c["key_path"]):
 		return _row("asc_key", "App Store Connect API key", "fail", c["key_path"],
-			"asc_key_path points at a missing file — fix the path to the downloaded AuthKey_%s.p8." % c["key_id"])
+			"The key file is missing — re-drop the downloaded AuthKey_%s.p8 onto this panel (or Browse…)." % c["key_id"],
+			false, links)
+	if c["issuer_id"] == "":
+		return _row("asc_key", "App Store Connect API key", "warn",
+			"key %s — missing Issuer ID" % c["key_id"],
+			"Nearly there: copy the Issuer ID (top of the API-keys page, it has a Copy button) into the field below and Save.",
+			false, links)
 	var py: Dictionary = Exec.run(PackedStringArray(["command", "-v", "python3"]))
 	if int(py["code"]) != 0:
 		return _row("asc_key", "App Store Connect API key", "warn", "python3 missing",
@@ -603,6 +610,63 @@ func _set_row(id: String, status: String, detail: String, guidance := "", links:
 			row["guidance"] = guidance
 			row["links"] = links
 	preflight_changed.emit(preflight_rows)
+
+
+# ── ASC key adoption ──────────────────────────────────────────────────────────
+
+## Apple names every downloaded key AuthKey_<KEYID>.p8 — the key id rides in
+## the filename, so a dropped file configures itself.
+static func parse_key_id_from_filename(path: String) -> String:
+	var file := path.get_file()
+	if file.begins_with("AuthKey_") and file.ends_with(".p8"):
+		var id := file.trim_prefix("AuthKey_").trim_suffix(".p8")
+		if id.length() >= 6:
+			return id
+	return ""
+
+
+## Ingest a dropped/browsed .p8: extract the key id, copy the file to
+## ~/private_keys/ (outside any repo, so it can never be committed), lock it to
+## 600, and persist both into build_kit.config.json. The Issuer ID is NOT in
+## the file — set_asc_issuer() completes the pair.
+func adopt_asc_key(p8_path: String) -> Dictionary:
+	if not FileAccess.file_exists(p8_path):
+		return err("File not found: " + p8_path)
+	var key_id := parse_key_id_from_filename(p8_path)
+	if key_id == "":
+		return err("Expected Apple's filename AuthKey_<KEYID>.p8 — got '%s'. Re-download (or rename it back) and retry." % p8_path.get_file())
+	var f := FileAccess.open(p8_path, FileAccess.READ)
+	if f == null or not f.get_as_text().contains("BEGIN PRIVATE KEY"):
+		return err("'%s' doesn't look like a .p8 private key." % p8_path.get_file())
+	var dest_dir := OS.get_environment("HOME").path_join("private_keys")
+	var dest := dest_dir.path_join(p8_path.get_file())
+	if dest != p8_path:
+		DirAccess.make_dir_recursive_absolute(dest_dir)
+		var w := FileAccess.open(dest, FileAccess.WRITE)
+		if w == null:
+			return err("Cannot write " + dest)
+		w.store_string(FileAccess.open(p8_path, FileAccess.READ).get_as_text())
+		w.close()
+		Exec.run(PackedStringArray(["chmod", "600", dest]))
+	config["ios"]["asc_key_id"] = key_id
+	config["ios"]["asc_key_path"] = dest
+	save_config()
+	refresh_preflight()
+	var need_issuer: bool = str(config["ios"].get("asc_issuer_id", "")) == ""
+	return ok({"message": "Key %s installed at %s.%s" % [key_id, dest,
+		" Now paste the Issuer ID and Save." if need_issuer else ""]})
+
+
+func set_asc_issuer(issuer: String) -> Dictionary:
+	issuer = issuer.strip_edges()
+	if issuer == "":
+		return err("Paste the Issuer ID first — it's at the top of the API-keys page (Copy button).")
+	if issuer.count("-") != 4 or issuer.length() < 32:
+		return err("That doesn't look like an Issuer ID (a UUID like 69a6de78-…). Copy it from the top of the API-keys page.")
+	config["ios"]["asc_issuer_id"] = issuer
+	save_config()
+	refresh_preflight()
+	return ok({"message": "Issuer ID saved."})
 
 
 # ── Fixes ─────────────────────────────────────────────────────────────────────
