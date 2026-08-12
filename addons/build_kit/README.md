@@ -58,25 +58,49 @@ preset's signing fields stay **empty** and no secret ever lands in
    Browse…) — the key id and path are extracted from Apple's
    `AuthKey_<KEYID>.p8` filename and the file is copied to `~/private_keys/`
    (chmod 600, outside any repo) — and paste the **Issuer ID** from the top of
-   that page into the field. All of that lands in `res://build_kit.config.json`
-   (project root, NOT inside the addon — self-update overwrites this folder):
+   that page into the field.
+
+### Where the two kinds of state live
+
+Build Kit splits its state by whether it is safe to commit:
+
+| | File | Committed? | Holds |
+|---|---|---|---|
+| Shared settings | `res://build_kit.config.json` | **yes** | `preset`, `build_number` |
+| Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` |
 
 ```json
 {
 	"ios": {
 		"preset": "iOS",
-		"build_number": 1,
-		"asc_key_id": "ABC123DEFG",
-		"asc_issuer_id": "12345678-abcd-...",
-		"asc_key_path": "~/private_keys/AuthKey_ABC123DEFG.p8"
+		"build_number": 1
 	}
 }
 ```
 
-`ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_PATH` in the environment or a repo
-`.env` (`res://.env` or `res://../.env`) work as fallbacks. Without a key the
-pipeline uses your signed-in Xcode session — fine interactively, but sessions
-expire and the app-record check then only happens reactively at upload time.
+```sh
+# .env — written for you when you drop the .p8 / save the Issuer ID
+ASC_KEY_ID=ABC123DEFG
+ASC_ISSUER_ID=12345678-abcd-...
+ASC_KEY_PATH=~/private_keys/AuthKey_ABC123DEFG.p8
+```
+
+The key path is stored home-relative so it still resolves on another machine.
+Saving a credential also checks that the `.env` is gitignored and adds the rule
+if it is missing — writing a secret into a tracked file would only relocate the
+leak. `ASC_*` in the process environment works too, and takes precedence over
+the `.env`.
+
+> **Upgrading from ≤ 0.1.7:** those versions wrote the three `asc_*` fields into
+> `build_kit.config.json`, which is committed. On first load 0.1.8+ moves any it
+> finds into the `.env` and drops them from the config — so the next commit
+> removes them. They are *identifiers*, not the private key (the `.p8` was always
+> kept outside the repo), so this is hygiene rather than an incident; but if the
+> config was pushed to a public repo, treat the pairing as disclosed.
+
+Without a key the pipeline uses your signed-in Xcode session — fine
+interactively, but sessions expire and the app-record check then only happens
+reactively at upload time.
 
 One-time steps no tool can automate (the preflight walks you through them):
 Apple Developer Program membership, creating the API key, and creating the

@@ -116,6 +116,48 @@ func _initialize() -> void:
 
 	# config defaults
 	_check("default config", int(ServiceT.default_config()["ios"]["build_number"]) == 1)
+	# ...and carries no credential fields — those belong in the gitignored .env
+	var defaults: Dictionary = ServiceT.default_config()
+	_check("default config holds no secrets",
+		not defaults["ios"].has("asc_key_id") and not defaults["ios"].has("asc_issuer_id")
+		and not defaults["ios"].has("asc_key_path"), str(defaults))
+
+	# .env upsert
+	var up_new := ServiceT.upsert_env_text("# comment\nOTHER=1\n", {"ASC_KEY_ID": "ABC"})
+	_check("env upsert appends", ServiceT.parse_env(up_new).get("ASC_KEY_ID", "") == "ABC", up_new)
+	_check("env upsert keeps others", ServiceT.parse_env(up_new).get("OTHER", "") == "1", up_new)
+	_check("env upsert keeps comments", up_new.contains("# comment"), up_new)
+	var up_over := ServiceT.upsert_env_text("ASC_KEY_ID=OLD\nOTHER=1\n", {"ASC_KEY_ID": "NEW"})
+	_check("env upsert overwrites in place", ServiceT.parse_env(up_over).get("ASC_KEY_ID", "") == "NEW", up_over)
+	_check("env upsert no duplicate key", up_over.count("ASC_KEY_ID") == 1, up_over)
+	_check("env upsert keeps export prefix",
+		ServiceT.upsert_env_text("export ASC_KEY_ID=OLD\n", {"ASC_KEY_ID": "NEW"}).begins_with("export ASC_KEY_ID=NEW"))
+	var up_empty := ServiceT.upsert_env_text("", {"A": "1", "B": "2"})
+	_check("env upsert from empty", ServiceT.parse_env(up_empty).get("A", "") == "1"
+		and ServiceT.parse_env(up_empty).get("B", "") == "2", up_empty)
+	var up_nonl := ServiceT.upsert_env_text("OTHER=1", {"A": "1"})
+	_check("env upsert without trailing newline", ServiceT.parse_env(up_nonl).get("A", "") == "1"
+		and ServiceT.parse_env(up_nonl).get("OTHER", "") == "1", up_nonl)
+	_check("env upsert ignores commented key",
+		ServiceT.upsert_env_text("#ASC_KEY_ID=OLD\n", {"ASC_KEY_ID": "NEW"}).contains("#ASC_KEY_ID=OLD"))
+
+	# tildify — a key path must survive moving between machines
+	var home := OS.get_environment("HOME")
+	_check("tildify home path", ServiceT.tildify(home + "/private_keys/k.p8") == "~/private_keys/k.p8")
+	_check("tildify leaves other paths", ServiceT.tildify("/opt/k.p8") == "/opt/k.p8")
+
+	# legacy-config migration (the decision half; the write half touches disk)
+	var legacy := {"preset": "iOS", "build_number": 3, "asc_key_id": "K1", "asc_issuer_id": "I1",
+		"asc_key_path": home + "/private_keys/AuthKey_K1.p8"}
+	var moved := ServiceT.config_secrets_as_env(legacy)
+	_check("migrate finds all three", moved.size() == 3, str(moved))
+	_check("migrate maps to env names", moved.get("ASC_KEY_ID", "") == "K1"
+		and moved.get("ASC_ISSUER_ID", "") == "I1", str(moved))
+	_check("migrate tildifies key path", moved.get("ASC_KEY_PATH", "") == "~/private_keys/AuthKey_K1.p8", str(moved))
+	_check("migrate no-ops on clean config",
+		ServiceT.config_secrets_as_env({"preset": "iOS", "build_number": 3}).is_empty())
+	_check("migrate ignores blank fields",
+		ServiceT.config_secrets_as_env({"asc_key_id": "", "asc_issuer_id": "  "}).is_empty())
 
 	# ASC key ingest
 	_check("key id from filename", ServiceT.parse_key_id_from_filename("/d/AuthKey_ABC123DEFG.p8") == "ABC123DEFG")

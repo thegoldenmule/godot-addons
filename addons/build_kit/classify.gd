@@ -36,7 +36,7 @@ static func rules() -> Array:
 			"id": "not_signed_in",
 			"patterns": ["No Accounts", "Your session has expired", "No Apple ID", "requires a development team", "Signing for \"", "No signing certificate"],
 			"title": "No usable Apple account / team for signing",
-			"guidance": "Either sign into Xcode (Xcode → Settings → Accounts → ＋, then select team {team_id}) or configure an App Store Connect API key in build_kit.config.json (asc_key_id / asc_issuer_id / asc_key_path) — the API key also works headless and never expires like a login session.",
+			"guidance": "Either sign into Xcode (Xcode → Settings → Accounts → ＋, then select team {team_id}) or drop an App Store Connect API key (.p8) on the preflight row — it saves ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH to your gitignored .env, works headless, and never expires like a login session.",
 			"links": [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 		},
 		{
@@ -69,7 +69,7 @@ static func rules() -> Array:
 			"id": "asc_auth",
 			"patterns": ["Failed to authenticate", "authentication credentials", "NOT_AUTHORIZED", "401"],
 			"title": "App Store Connect authentication failed",
-			"guidance": "The configured API key was rejected. Re-check asc_key_id, asc_issuer_id and that asc_key_path points at the downloaded .p8 (App Store Connect → Users and Access → Integrations). The key needs the App Manager (or Developer) role.",
+			"guidance": "The configured API key was rejected. Re-check ASC_KEY_ID, ASC_ISSUER_ID and that ASC_KEY_PATH points at the downloaded .p8 in your .env (App Store Connect → Users and Access → Integrations). The key needs the App Manager (or Developer) role.",
 			"links": [{"label": "Open Integrations", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 		},
 		{

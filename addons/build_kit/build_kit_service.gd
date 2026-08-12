@@ -18,12 +18,18 @@ extends "res://addons/editor_tool_kit/tool_service.gd"
 ## Failures are mapped to guidance by classify.gd.
 ##
 ## Project-specific state lives OUTSIDE the addon (self-update overwrites this
-## folder): res://build_kit.config.json + optional ASC_* env / .env fallbacks.
+## folder): res://build_kit.config.json for shared settings (committed) and the
+## repo .env for ASC_* credentials (gitignored, never committed).
 
 const Exec := preload("res://addons/build_kit/exec.gd")
 const Classify := preload("res://addons/build_kit/classify.gd")
 
 const CONFIG_PATH := "res://build_kit.config.json"
+
+## Candidate .env files, in precedence order — the first hit wins on read, and
+## the first that already exists is what we write to. `res://../.env` covers the
+## common layout where the Godot project is a subdir of the repo.
+const ENV_PATHS := ["res://.env", "res://../.env"]
 
 signal preflight_changed(rows: Array)
 signal stage_changed(stage: String)
@@ -57,14 +63,14 @@ func _process(_delta: float) -> void:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+## Committed, so it holds only what collaborators share. ASC credentials live in
+## the .env (see the Secrets section); they are read from here for back-compat
+## but migrated out on load.
 static func default_config() -> Dictionary:
 	return {
 		"ios": {
 			"preset": "iOS",
 			"build_number": 1,
-			"asc_key_id": "",
-			"asc_issuer_id": "",
-			"asc_key_path": "",
 		},
 	}
 
@@ -83,6 +89,7 @@ func load_config() -> Dictionary:
 	# JSON numbers parse as floats; keep the build number an int so it
 	# round-trips as one (CFBundleVersion "2", not "2.0").
 	config["ios"]["build_number"] = int(config["ios"].get("build_number", 1))
+	migrate_config_secrets_to_env()
 	return config
 
 
@@ -93,9 +100,9 @@ func save_config() -> void:
 		f.close()
 
 
-## ASC API credentials: config first, then environment, then a repo .env
-## (res://.env or res://../.env — Moveborne keeps its .env one level above the
-## Godot project). Returns {key_id, issuer_id, key_path}; empty strings = unset.
+## ASC API credentials: config first (legacy — see migrate_config_secrets_to_env),
+## then environment, then a repo .env. Returns {key_id, issuer_id, key_path};
+## empty strings = unset.
 func asc_credentials() -> Dictionary:
 	var ios: Dictionary = config.get("ios", {})
 	var creds := {
@@ -104,7 +111,7 @@ func asc_credentials() -> Dictionary:
 		"key_path": str(ios.get("asc_key_path", "")),
 	}
 	var env := {}
-	for env_path in ["res://.env", "res://../.env"]:
+	for env_path in ENV_PATHS:
 		if FileAccess.file_exists(env_path):
 			var f := FileAccess.open(env_path, FileAccess.READ)
 			env.merge(parse_env(f.get_as_text()))
@@ -141,6 +148,137 @@ static func parse_env(text: String) -> Dictionary:
 		var value := s.substr(eq + 1).strip_edges().trim_prefix("\"").trim_suffix("\"")
 		out[key] = value
 	return out
+
+
+# ── Secrets (.env) ────────────────────────────────────────────────────────────
+#
+# build_kit.config.json is committed — it carries the preset name and build
+# number, which every collaborator wants. ASC credentials are the opposite: the
+# .p8 is already kept outside the repo, so its id/issuer/path belong outside too,
+# in the gitignored .env the read path already falls back to.
+
+## The .env we write to: the first candidate that already exists, else the first.
+static func env_write_path() -> String:
+	for p in ENV_PATHS:
+		if FileAccess.file_exists(p):
+			return p
+	return ENV_PATHS[0]
+
+
+## Home-relative form, so a path written on one machine still resolves on another
+## (asc_credentials() expands a leading ~).
+static func tildify(path: String) -> String:
+	var home := OS.get_environment("HOME")
+	if home != "" and path.begins_with(home + "/"):
+		return "~" + path.substr(home.length())
+	return path
+
+
+## Upsert KEY=value pairs into .env text: rewrite an existing key's value in
+## place (keeping any `export ` prefix), append the rest. Comments, blank lines
+## and unrelated keys survive untouched. Pure, so the verifier can exercise it
+## without touching disk.
+static func upsert_env_text(text: String, vars: Dictionary) -> String:
+	var remaining := vars.duplicate()
+	var out := PackedStringArray()
+	for line in text.split("\n"):
+		var s := line.strip_edges()
+		var handled := false
+		if not s.is_empty() and not s.begins_with("#") and s.contains("="):
+			var key := s.substr(0, s.find("=")).trim_prefix("export ").strip_edges()
+			if remaining.has(key):
+				out.append("%s%s=%s" % ["export " if s.begins_with("export ") else "", key, remaining[key]])
+				remaining.erase(key)
+				handled = true
+		if not handled:
+			out.append(line)
+	var joined := "\n".join(out)
+	if not remaining.is_empty():
+		if not joined.is_empty() and not joined.ends_with("\n"):
+			joined += "\n"
+		for key in remaining:
+			joined += "%s=%s\n" % [key, remaining[key]]
+	return joined
+
+
+## Writing a secret into a file git tracks would just relocate the leak, so make
+## sure the .env we just wrote is actually ignored. Only touches an existing
+## .gitignore, or creates one beside a .git dir — never litters a non-repo.
+static func ensure_env_gitignored(env_res_path: String) -> bool:
+	var dir := ProjectSettings.globalize_path(env_res_path).get_base_dir()
+	var ignore := dir.path_join(".gitignore")
+	var text := ""
+	var exists := FileAccess.file_exists(ignore)
+	if not exists and not DirAccess.dir_exists_absolute(dir.path_join(".git")):
+		return false
+	if exists:
+		var r := FileAccess.open(ignore, FileAccess.READ)
+		if r != null:
+			text = r.get_as_text()
+		for line in text.split("\n"):
+			if line.strip_edges() in [".env", "/.env", "*.env", ".env*"]:
+				return true
+	if not text.is_empty() and not text.ends_with("\n"):
+		text += "\n"
+	var f := FileAccess.open(ignore, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(text + ".env\n")
+	f.close()
+	return true
+
+
+## Persist secrets to the repo .env. Returns the path written ("" on failure).
+func write_env_vars(vars: Dictionary) -> String:
+	var path := env_write_path()
+	var text := ""
+	if FileAccess.file_exists(path):
+		var r := FileAccess.open(path, FileAccess.READ)
+		if r != null:
+			text = r.get_as_text()
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		push_warning("build_kit: cannot write %s" % path)
+		return ""
+	f.store_string(upsert_env_text(text, vars))
+	f.close()
+	ensure_env_gitignored(path)
+	return path
+
+
+const SECRET_FIELDS := [
+	["asc_key_id", "ASC_KEY_ID"],
+	["asc_issuer_id", "ASC_ISSUER_ID"],
+	["asc_key_path", "ASC_KEY_PATH"],
+]
+
+## The .env vars an ios config's legacy secret fields map to; {} when clean.
+## Pure — the decision half of migrate_config_secrets_to_env().
+static func config_secrets_as_env(ios: Dictionary) -> Dictionary:
+	var out := {}
+	for pair in SECRET_FIELDS:
+		var value := str(ios.get(pair[0], "")).strip_edges()
+		if value != "":
+			out[pair[1]] = tildify(value) if pair[0] == "asc_key_path" else value
+	return out
+
+
+## Versions before 0.1.8 wrote the ASC ids into build_kit.config.json, which is
+## committed. Move any we find into the .env and drop the config fields.
+## Idempotent — a no-op once the config is clean. Returns the vars moved.
+func migrate_config_secrets_to_env() -> Dictionary:
+	var moved := config_secrets_as_env(config.get("ios", {}))
+	if moved.is_empty():
+		return {}
+	var path := write_env_vars(moved)
+	if path == "":
+		return {}
+	for pair in SECRET_FIELDS:
+		config["ios"].erase(pair[0])
+	save_config()
+	print("build_kit: moved %s out of %s into %s (it is committed; secrets don't belong in it)"
+		% [", ".join(PackedStringArray(moved.keys())), CONFIG_PATH, path])
+	return moved
 
 
 # ── Preset ────────────────────────────────────────────────────────────────────
@@ -682,8 +820,9 @@ static func parse_key_id_from_filename(path: String) -> String:
 
 ## Ingest a dropped/browsed .p8: extract the key id, copy the file to
 ## ~/private_keys/ (outside any repo, so it can never be committed), lock it to
-## 600, and persist both into build_kit.config.json. The Issuer ID is NOT in
-## the file — set_asc_issuer() completes the pair.
+## 600, and persist the id + path into the gitignored .env — NOT into
+## build_kit.config.json, which is committed. The Issuer ID is NOT in the file —
+## set_asc_issuer() completes the pair.
 func adopt_asc_key(p8_path: String) -> Dictionary:
 	if not FileAccess.file_exists(p8_path):
 		return err("File not found: " + p8_path)
@@ -703,12 +842,12 @@ func adopt_asc_key(p8_path: String) -> Dictionary:
 		w.store_string(FileAccess.open(p8_path, FileAccess.READ).get_as_text())
 		w.close()
 		Exec.run(PackedStringArray(["chmod", "600", dest]))
-	config["ios"]["asc_key_id"] = key_id
-	config["ios"]["asc_key_path"] = dest
-	save_config()
+	var env_file := write_env_vars({"ASC_KEY_ID": key_id, "ASC_KEY_PATH": tildify(dest)})
+	if env_file == "":
+		return err("Key copied to %s but %s could not be written." % [dest, env_write_path()])
 	refresh_preflight()
-	var need_issuer: bool = str(config["ios"].get("asc_issuer_id", "")) == ""
-	return ok({"message": "Key %s installed at %s.%s" % [key_id, dest,
+	var need_issuer: bool = str(asc_credentials().get("issuer_id", "")) == ""
+	return ok({"message": "Key %s installed at %s; id + path saved to %s.%s" % [key_id, dest, env_file,
 		" Now paste the Issuer ID and Save." if need_issuer else ""]})
 
 
@@ -718,10 +857,11 @@ func set_asc_issuer(issuer: String) -> Dictionary:
 		return err("Paste the Issuer ID first — it's at the top of the API-keys page (Copy button).")
 	if issuer.count("-") != 4 or issuer.length() < 32:
 		return err("That doesn't look like an Issuer ID (a UUID like 69a6de78-…). Copy it from the top of the API-keys page.")
-	config["ios"]["asc_issuer_id"] = issuer
-	save_config()
+	var env_file := write_env_vars({"ASC_ISSUER_ID": issuer})
+	if env_file == "":
+		return err("Could not write %s." % env_write_path())
 	refresh_preflight()
-	return ok({"message": "Issuer ID saved."})
+	return ok({"message": "Issuer ID saved to %s." % env_file})
 
 
 # ── Fixes ─────────────────────────────────────────────────────────────────────
