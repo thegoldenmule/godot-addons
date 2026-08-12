@@ -155,8 +155,14 @@ func _fill_links(bar: HBoxContainer, links: Array) -> void:
 
 
 func _open_url(url: String) -> void:
-	if url != "":
-		OS.shell_open(url)
+	if url == "":
+		return
+	if url.begins_with("/"):
+		# A local path (e.g. /Applications/Xcode.app): `open` launches the app,
+		# where shell_open would only reveal it.
+		OS.create_process("/usr/bin/open", [url])
+		return
+	OS.shell_open(url)
 
 
 # ── Preflight rendering ───────────────────────────────────────────────────────

@@ -513,7 +513,8 @@ func _check_dist_cert() -> Dictionary:
 	if out.contains("Apple Distribution") or out.contains("iOS Distribution"):
 		return _row("dist_cert", "Distribution certificate", "ok", "in keychain")
 	return _row("dist_cert", "Distribution certificate", "warn", "not in keychain",
-		"Needed by the upload step (API-key auth doesn't get the cloud-managed cert a logged-in Xcode session would). One-time, 3 clicks:\n1. Xcode → Settings → Accounts → select your team\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Refresh here.")
+		"1. Xcode → Settings → Accounts → select your team\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Refresh here.",
+		false, [{"label": "Open Xcode", "url": "/Applications/Xcode.app"}])
 
 
 func _check_asc_key() -> Dictionary:
@@ -521,7 +522,7 @@ func _check_asc_key() -> Dictionary:
 	var links := [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}]
 	if c["key_id"] == "" and c["key_path"] == "":
 		return _row("asc_key", "App Store Connect API key", "warn", "not configured",
-			"Recommended (headless auth, proactive app-record checks, TestFlight polling). Three clicks:\n1. ↗ Create API key → ＋ → any name, role: App Manager → Generate\n2. Download the .p8 (downloadable exactly once), then drop it on this panel — or Browse… — and the key id + path are extracted automatically\n3. Copy the Issuer ID from the top of that same page into the field below and Save",
+			"1. ↗ Create API key → ＋ → any name, role: App Manager → Generate\n2. Download the .p8, then drop it on this panel (or Browse…)\n3. Copy the Issuer ID from the top of that page into the field below and Save",
 			false, links)
 	if c["key_path"] == "" or not FileAccess.file_exists(c["key_path"]):
 		return _row("asc_key", "App Store Connect API key", "fail", c["key_path"],

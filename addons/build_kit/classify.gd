@@ -16,7 +16,8 @@ static func rules() -> Array:
 			"id": "no_dist_cert",
 			"patterns": ["No signing certificate \"iOS Distribution\"", "No signing certificate \"Apple Distribution\""],
 			"title": "No distribution certificate in the keychain",
-			"guidance": "The upload step signs with an Apple Distribution certificate, and the login keychain doesn't have one (API-key auth doesn't get the cloud-managed certificate a logged-in Xcode session would). One-time, 3 clicks:\n1. Xcode → Settings → Accounts → select team {team_id}\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Close and press the build button again.",
+			"guidance": "1. Xcode → Settings → Accounts → select team {team_id}\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Press the build button again.",
+			"links": [{"label": "Open Xcode", "url": "/Applications/Xcode.app"}],
 		},
 		{
 			"id": "missing_app_record",
