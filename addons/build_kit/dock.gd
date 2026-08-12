@@ -179,11 +179,12 @@ func _make_row(row: Dictionary) -> Control:
 	box.add_child(line)
 
 	if str(row["status"]) != "ok" and str(row.get("guidance", "")) != "":
+		# Editor-default font size on purpose: a shrunken caption size is
+		# unreadable on hi-DPI — the dim color alone marks it as secondary.
 		var guide := Label.new()
 		guide.text = str(row["guidance"])
 		guide.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		guide.add_theme_color_override("font_color", Pal.CAPTION)
-		guide.add_theme_font_size_override("font_size", Pal.H_CAPTION)
 		box.add_child(guide)
 	return box
 
