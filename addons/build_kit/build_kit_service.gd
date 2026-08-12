@@ -843,19 +843,27 @@ func _poll_asc() -> void:
 		var apps: Array = result.get("apps", [])
 		var name := str(apps[0].get("name", "")) if not apps.is_empty() else ""
 		_set_row("app_record", "ok", name)
+	elif not result.get("bundle_registered", true):
+		# Nothing has registered the App ID yet (signing does it, but only once
+		# a first build has run) — the New App dialog's dropdown would be empty.
+		_set_row("app_record", "fail", "bundle id not registered",
+			"1. Press Fix — registers %s on the team through the API key\n2. Then: My Apps → ＋ → New App → pick it from the Bundle ID dropdown." % bundle,
+			[{"label": "Register manually", "url": "https://developer.apple.com/account/resources/identifiers/add/bundleId"}],
+			true)
 	else:
 		_set_row("app_record", "fail", "missing for " + bundle,
-			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown (already registered by signing)\n4. SKU: any internal id. Then Refresh." % bundle,
+			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown\n4. SKU: any internal id. Then Refresh.\nIf you created it and this row stays red, the API key belongs to a different team — create a key under this app's team and drop its .p8 above." % bundle,
 			[{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
 
 
-func _set_row(id: String, status: String, detail: String, guidance := "", links: Array = []) -> void:
+func _set_row(id: String, status: String, detail: String, guidance := "", links: Array = [], fixable := false) -> void:
 	for row in preflight_rows:
 		if row["id"] == id:
 			row["status"] = status
 			row["detail"] = detail
 			row["guidance"] = guidance
 			row["links"] = links
+			row["fixable"] = fixable
 	preflight_changed.emit(preflight_rows)
 
 
@@ -1005,7 +1013,30 @@ func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 			return _fix_preset(str(opts.get("team_id", "")))
 		"templates":
 			return _fix_templates()
+		"app_record":
+			return _fix_bundle_id()
 	return err("No fix for '%s'." % id)
+
+
+## Register the preset's App ID on the developer portal through the API key —
+## the same operation as Identifiers → ＋, so the New App dialog's Bundle ID
+## dropdown has something to pick.
+func _fix_bundle_id() -> Dictionary:
+	if not _fix_proc.is_empty():
+		return err("A fix is already running.")
+	if not has_asc_key():
+		return err("Needs an ASC API key (see the row above).")
+	var preset := load_ios_preset()
+	if preset.is_empty():
+		return err("No iOS preset.")
+	var handle := _spawn_asc("ensure-bundle-id", preset["bundle_id"], "asc_bundle_id.log")
+	if not handle.get("ok", false):
+		return err(str(handle.get("error", "spawn failed")))
+	handle["label"] = "bundle-id registration"
+	_fix_proc = handle
+	_set_row("app_record", "busy", "registering %s…" % preset["bundle_id"])
+	log_line.emit("\n── bundle-id registration ──\n")
+	return ok({"message": "Registering the bundle id via the API key…"})
 
 
 ## Download the official export-template pack for the running Godot version and
@@ -1032,6 +1063,7 @@ func _fix_templates() -> Dictionary:
 	var handle := Exec.spawn_shell(shell, cache.path_join("templates_install.log"))
 	if not handle.get("ok", false):
 		return err(str(handle.get("error", "spawn failed")))
+	handle["label"] = "templates install"
 	_fix_proc = handle
 	_set_row("templates", "busy", "downloading + installing (~1 GB, several minutes)…")
 	log_line.emit("\n── templates install ──\n%s\n→ %s\n" % [url, dest])
@@ -1048,9 +1080,10 @@ func _poll_fix() -> void:
 	var code := Exec.exit_code(_fix_proc["exit_path"])
 	if code < 0:
 		return
+	var label := str(_fix_proc.get("label", "fix"))
 	_fix_proc = {}
-	log_line.emit("templates installed.\n" if code == 0
-		else "templates install FAILED (exit %d) — see above.\n" % code)
+	log_line.emit("%s finished.\n" % label if code == 0
+		else "%s FAILED (exit %d) — see above.\n" % [label, code])
 	refresh_preflight()
 
 

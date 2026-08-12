@@ -80,12 +80,28 @@ def get(token: str, path: str) -> dict:
         return json.load(resp)
 
 
+def post(token: str, path: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        API + path,
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def bundle_id_registered(token: str, identifier: str) -> bool:
+    reg = get(token, "/v1/bundleIds?filter[identifier]=" + identifier)
+    return any(b["attributes"].get("identifier") == identifier for b in reg.get("data", []))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--issuer-id", required=True)
-    parser.add_argument("command", choices=["check-app", "builds"])
+    parser.add_argument("command", choices=["check-app", "builds", "ensure-bundle-id"])
     parser.add_argument("arg")
     args = parser.parse_args()
     try:
@@ -98,10 +114,25 @@ def main() -> None:
                     {
                         "ok": True,
                         "found": len(apps) > 0,
+                        "bundle_registered": bundle_id_registered(token, args.arg),
                         "apps": [{"id": a["id"], "name": a["attributes"]["name"]} for a in apps],
                     }
                 )
             )
+        elif args.command == "ensure-bundle-id":
+            # Registering an App ID is an ordinary, reversible developer-portal
+            # operation (same as Identifiers → ＋), done with the user's own key.
+            if bundle_id_registered(token, args.arg):
+                print(json.dumps({"ok": True, "created": False,
+                                  "message": "Bundle id already registered."}))
+                return
+            name = "".join(c for c in args.arg.split(".")[-1].title() if c.isalnum()) or "App"
+            post(token, "/v1/bundleIds", {
+                "data": {"type": "bundleIds",
+                         "attributes": {"identifier": args.arg, "name": name,
+                                        "platform": "IOS"}}})
+            print(json.dumps({"ok": True, "created": True,
+                              "message": "Bundle id %s registered." % args.arg}))
         elif args.command == "builds":
             data = get(token, "/v1/apps?filter[bundleId]=" + args.arg)
             apps = data.get("data", [])
