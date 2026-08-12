@@ -246,8 +246,18 @@ func start_build(upload := true) -> Dictionary:
 	var root := ProjectSettings.globalize_path("res://")
 	var paths := derive_paths(root, _preset["export_path"])
 	var build_number := int(config["ios"].get("build_number", 1))
-	_context = {"bundle_id": _preset["bundle_id"], "team_id": _preset["team_id"]}
+	_context = {"bundle_id": _preset["bundle_id"], "team_id": _preset["team_id"],
+		"key_id": str(asc_credentials()["key_id"])}
 	_upload = upload
+
+	# Auth choice: a logged-in Xcode session cloud-signs with full permission,
+	# so prefer it; API-key flags only when there is no session (headless/CI).
+	# A Developer-role key authenticates but CANNOT manage signing assets
+	# ("Cloud signing permission error"), so forcing the key when a session
+	# exists only downgrades capability.
+	var teams := parse_teams(str(Exec.run(PackedStringArray(
+		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
+	var use_key := teams.is_empty() and has_asc_key()
 
 	var f := FileAccess.open(paths["options_plist"], FileAccess.WRITE)
 	if f == null:
@@ -258,7 +268,9 @@ func start_build(upload := true) -> Dictionary:
 	f.store_string(make_export_options_xml(_preset["team_id"], upload))
 	f.close()
 
-	var auth := _auth_flags()
+	var auth := _auth_flags() if use_key else PackedStringArray()
+	log_line.emit("auth: %s\n" % ("ASC API key %s" % _context["key_id"] if use_key
+		else "Xcode session (teams: %s)" % ", ".join(teams)))
 	var pb := "/usr/libexec/PlistBuddy"
 	var plist: String = paths["info_plist"]
 	_stages = [

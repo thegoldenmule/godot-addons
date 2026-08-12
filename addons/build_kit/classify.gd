@@ -40,10 +40,23 @@ static func rules() -> Array:
 			"links": [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 		},
 		{
+			"id": "cloud_signing_permission",
+			"patterns": ["Cloud signing permission error"],
+			"title": "The API key can't manage signing (role too low)",
+			"guidance": "1. ↗ Open Integrations → find key {key_id} — its role must be App Manager (Developer keys can't cloud-sign)\n2. Roles can't be edited: revoke it, create a new key with role App Manager, drop the new .p8 on this panel\n3. Or simply stay signed into Xcode — a login session is used automatically when available.",
+			"links": [{"label": "Open Integrations", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
+		},
+		{
+			"id": "profile_missing_cert",
+			"patterns": ["doesn't include signing certificate"],
+			"title": "The managed profile predates your certificate",
+			"guidance": "1. Press the build button again — with working auth the managed profile regenerates to include the certificate\n2. If it repeats, the auth in use can't regenerate it: see the 'auth:' line at the top of the log (an API key must be role App Manager).",
+		},
+		{
 			"id": "no_profiles",
-			"patterns": ["No profiles for", "doesn't include signing certificate", "Provisioning profile", "profile doesn't match"],
+			"patterns": ["No profiles for", "Provisioning profile", "profile doesn't match"],
 			"title": "Provisioning profile problem",
-			"guidance": "With automatic signing + -allowProvisioningUpdates this should self-heal on retry. If it persists: check the bundle id {bundle_id} is registered to team {team_id} at developer.apple.com → Identifiers, and that any special capabilities are enabled on the App ID there first.",
+			"guidance": "1. Press the build button again (automatic signing regenerates profiles)\n2. If it repeats: ↗ Open Identifiers — {bundle_id} must be listed under team {team_id}\n3. If the app uses push/iCloud/etc., enable that capability on the App ID there first.",
 			"links": [{"label": "Open Identifiers", "url": "https://developer.apple.com/account/resources/identifiers/list"}],
 		},
 		{
