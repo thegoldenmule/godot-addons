@@ -451,7 +451,10 @@ func _check_xcode() -> Dictionary:
 func _check_templates() -> Dictionary:
 	var v: Dictionary = Engine.get_version_info()
 	var ver := "%d.%d.%d.%s" % [v["major"], v["minor"], v["patch"], v["status"]]
-	var path := OS.get_data_dir().path_join("export_templates").path_join(ver).path_join("ios.zip")
+	# OS.get_data_dir() is the platform data root (~/Library/Application Support);
+	# Godot's templates live under its own "Godot" subdir. macOS spelling is fine
+	# here — the whole iOS pipeline is macOS-only (xcodebuild).
+	var path := OS.get_data_dir().path_join("Godot").path_join("export_templates").path_join(ver).path_join("ios.zip")
 	if not FileAccess.file_exists(path):
 		return _row("templates", "iOS export templates", "fail", ver,
 			"Editor → Manage Export Templates → Download and Install (version %s)." % ver)
