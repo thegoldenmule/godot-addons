@@ -22,6 +22,7 @@ var _btn_cancel: Button
 var _btn_tf_status: Button
 var _p8_dialog: EditorFileDialog
 var _issuer_text := ""   # survives preflight-row rebuilds (rows re-render on refresh)
+var _bundle_text := ""   # ditto, for the create-preset form
 
 
 func _ready() -> void:
@@ -226,7 +227,34 @@ func _make_row(row: Dictionary) -> Control:
 			box.add_child(bar)
 		if str(row["id"]) == "asc_key":
 			box.add_child(_make_asc_key_form())
+		if str(row["id"]) == "preset" and str(row["status"]) == "fail":
+			box.add_child(_make_preset_form())
 	return box
+
+
+## Create-preset mini-form: a bundle-id field (prefilled from the project name)
+## and a Create button — the service writes the whole preset itself.
+func _make_preset_form() -> Control:
+	if _bundle_text == "":
+		_bundle_text = service.default_bundle_id()
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", Pal.SEP)
+	var bundle := LineEdit.new()
+	bundle.placeholder_text = "com.studio.game"
+	bundle.text = _bundle_text
+	bundle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bundle.text_changed.connect(_on_bundle_changed)
+	row.add_child(bundle)
+	row.add_child(Ui.button("Create preset", _on_create_preset))
+	return row
+
+
+func _on_bundle_changed(text: String) -> void:
+	_bundle_text = text
+
+
+func _on_create_preset() -> void:
+	_show_result(service.create_ios_preset(_bundle_text))
 
 
 ## The ASC-key ingest mini-form: Browse for (or drop) the downloaded .p8, and

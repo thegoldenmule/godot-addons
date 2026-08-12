@@ -146,6 +146,29 @@ func _initialize() -> void:
 	_check("tildify home path", ServiceT.tildify(home + "/private_keys/k.p8") == "~/private_keys/k.p8")
 	_check("tildify leaves other paths", ServiceT.tildify("/opt/k.p8") == "/opt/k.p8")
 
+	# templates download URL / version tag
+	_check("version tag with patch", ServiceT.version_tag({"major": 4, "minor": 7, "patch": 1, "status": "stable"}) == "4.7.1")
+	_check("version tag zero patch", ServiceT.version_tag({"major": 4, "minor": 6, "patch": 0, "status": "stable"}) == "4.6")
+	_check("templates url stable", ServiceT.templates_url({"major": 4, "minor": 7, "patch": 1, "status": "stable"}) == "https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz")
+	_check("templates url non-stable empty", ServiceT.templates_url({"major": 4, "minor": 8, "patch": 0, "status": "beta1"}) == "")
+
+	# bundle-id validation + preset creation round-trip
+	_check("bundle id ok", ServiceT.valid_bundle_id("com.studio.game-2"))
+	_check("bundle id needs dot", not ServiceT.valid_bundle_id("game"))
+	_check("bundle id rejects junk", not ServiceT.valid_bundle_id("com..game") and not ServiceT.valid_bundle_id("com.stu dio.game"))
+	var svc2: Node = ServiceT.new()
+	var tmp_preset := "user://verify_build_kit_presets.cfg"
+	if FileAccess.file_exists(tmp_preset):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(tmp_preset))
+	var created: Dictionary = svc2.create_ios_preset("com.example.verify", tmp_preset)
+	_check("create preset ok", created.get("ok", false), str(created))
+	var created_text := FileAccess.open(tmp_preset, FileAccess.READ).get_as_text() if FileAccess.file_exists(tmp_preset) else ""
+	var reparsed := ServiceT.parse_ios_preset_text(created_text)
+	_check("created preset parses", reparsed.get("bundle_id", "") == "com.example.verify", created_text.left(200))
+	_check("created preset project-only", reparsed.get("export_project_only", false) == true)
+	_check("create rejects bad bundle", not svc2.create_ios_preset("nodots", tmp_preset).get("ok", true))
+	svc2.free()
+
 	# legacy-config migration (the decision half; the write half touches disk)
 	var legacy := {"preset": "iOS", "build_number": 3, "asc_key_id": "K1", "asc_issuer_id": "I1",
 		"asc_key_path": home + "/private_keys/AuthKey_K1.p8"}

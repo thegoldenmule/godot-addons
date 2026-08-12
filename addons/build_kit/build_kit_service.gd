@@ -49,6 +49,7 @@ var _preset := {}                # parsed iOS preset (cached at build start)
 var _asc_proc := {}              # async app-record preflight probe
 var _asc_started_ms := 0
 var _builds_proc := {}           # async TestFlight-status probe
+var _fix_proc := {}              # async preflight fix (templates download/install)
 
 
 func _ready() -> void:
@@ -59,6 +60,7 @@ func _process(_delta: float) -> void:
 	_poll_pipeline()
 	_poll_asc()
 	_poll_builds()
+	_poll_fix()
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -633,16 +635,42 @@ func _check_xcode() -> Dictionary:
 	return _row("xcode", "Xcode", "ok", str(r["output"]).split("\n")[0].strip_edges())
 
 
-func _check_templates() -> Dictionary:
+## Godot's version strings omit a zero patch: 4.6.0 → "4.6", 4.7.1 → "4.7.1".
+## Both the templates directory name and the release tag follow that form.
+static func version_tag(v: Dictionary) -> String:
+	if int(v.get("patch", 0)) == 0:
+		return "%d.%d" % [v["major"], v["minor"]]
+	return "%d.%d.%d" % [v["major"], v["minor"], v["patch"]]
+
+
+## Official template-pack download for stable releases; "" for non-stable
+## builds (their packs live in godot-builds with a different scheme).
+static func templates_url(v: Dictionary) -> String:
+	if str(v.get("status", "")) != "stable":
+		return ""
+	var tag := version_tag(v)
+	return "https://github.com/godotengine/godot/releases/download/%s-stable/Godot_v%s-stable_export_templates.tpz" % [tag, tag]
+
+
+func templates_dir() -> String:
 	var v: Dictionary = Engine.get_version_info()
-	var ver := "%d.%d.%d.%s" % [v["major"], v["minor"], v["patch"], v["status"]]
 	# OS.get_data_dir() is the platform data root (~/Library/Application Support);
 	# Godot's templates live under its own "Godot" subdir. macOS spelling is fine
 	# here — the whole iOS pipeline is macOS-only (xcodebuild).
-	var path := OS.get_data_dir().path_join("Godot").path_join("export_templates").path_join(ver).path_join("ios.zip")
-	if not FileAccess.file_exists(path):
+	return OS.get_data_dir().path_join("Godot").path_join("export_templates").path_join(
+		version_tag(v) + "." + str(v["status"]))
+
+
+func _check_templates() -> Dictionary:
+	var v: Dictionary = Engine.get_version_info()
+	var ver := version_tag(v) + "." + str(v["status"])
+	if not FileAccess.file_exists(templates_dir().path_join("ios.zip")):
+		if templates_url(v) == "":
+			return _row("templates", "iOS export templates", "fail", ver,
+				"1. Editor → Manage Export Templates → Download and Install (no direct download for non-stable builds).")
 		return _row("templates", "iOS export templates", "fail", ver,
-			"Editor → Manage Export Templates → Download and Install (version %s)." % ver)
+			"1. Press Fix — downloads the official %s template pack (~1 GB, several minutes) and installs it." % ver,
+			true)
 	return _row("templates", "iOS export templates", "ok", ver)
 
 
@@ -650,7 +678,7 @@ func _check_preset() -> Dictionary:
 	var preset := load_ios_preset()
 	if preset.is_empty():
 		return _row("preset", "iOS export preset", "fail", "",
-			"Create an iOS preset in Project → Export → Add… → iOS. Set the bundle identifier; leave signing fields empty (Build Kit signs via xcodebuild).")
+			"1. Enter the bundle id below (reverse-DNS, e.g. com.studio.game)\n2. Press Create preset.")
 	var problems := PackedStringArray()
 	if not preset["export_project_only"]:
 		problems.append("export_project_only is off")
@@ -805,6 +833,78 @@ func _set_row(id: String, status: String, detail: String, guidance := "", links:
 	preflight_changed.emit(preflight_rows)
 
 
+# ── Preset creation ───────────────────────────────────────────────────────────
+
+static func valid_bundle_id(id: String) -> bool:
+	var re := RegEx.create_from_string("^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$")
+	return re.search(id) != null
+
+
+## Prefill for the dock's create-preset field: com.example.<project-slug>.
+static func default_bundle_id() -> String:
+	var name := str(ProjectSettings.get_setting("application/config/name", "game"))
+	var slug := ""
+	for c in name.to_lower():
+		if (c >= "a" and c <= "z") or (c >= "0" and c <= "9"):
+			slug += c
+	return "com.example." + (slug if slug != "" else "game")
+
+
+static func clean_app_name() -> String:
+	var name := str(ProjectSettings.get_setting("application/config/name", "Game"))
+	var out := ""
+	for c in name:
+		if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9"):
+			out += c
+	return out if out != "" else "Game"
+
+
+## Write a ready-to-build iOS preset: export_project_only on (Build Kit owns
+## xcodebuild), signing fields untouched (xcodebuild owns signing), team id
+## auto-filled when exactly one Xcode team is signed in. `path` is overridable
+## so the verifier can exercise this without touching the project.
+func create_ios_preset(bundle_id: String, path := "res://export_presets.cfg") -> Dictionary:
+	bundle_id = bundle_id.strip_edges()
+	if not valid_bundle_id(bundle_id):
+		return err("Bundle id must be reverse-DNS, e.g. com.studio.game.")
+	if path == "res://export_presets.cfg" and not load_ios_preset().is_empty():
+		return err("An iOS preset already exists.")
+	var cfg := ConfigFile.new()
+	if FileAccess.file_exists(path):
+		if cfg.load(path) != OK:
+			return err("Cannot parse %s." % path)
+	var idx := 0
+	while cfg.has_section("preset.%d" % idx):
+		idx += 1
+	var sec := "preset.%d" % idx
+	cfg.set_value(sec, "name", "iOS")
+	cfg.set_value(sec, "platform", "iOS")
+	cfg.set_value(sec, "runnable", true)
+	cfg.set_value(sec, "export_filter", "all_resources")
+	cfg.set_value(sec, "export_path", "build/ios/%s.ipa" % clean_app_name())
+	var opt := sec + ".options"
+	cfg.set_value(opt, "application/export_project_only", true)
+	cfg.set_value(opt, "architectures/arm64", true)
+	cfg.set_value(opt, "application/bundle_identifier", bundle_id)
+	cfg.set_value(opt, "application/export_method_debug", 1)
+	cfg.set_value(opt, "application/export_method_release", 0)
+	cfg.set_value(opt, "application/targeted_device_family", 2)
+	cfg.set_value(opt, "application/short_version", "1.0")
+	cfg.set_value(opt, "application/version", "1.0")
+	var msg := "iOS preset created (%s)" % bundle_id
+	var teams := parse_teams(str(Exec.run(PackedStringArray(
+		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
+	if teams.size() == 1:
+		cfg.set_value(opt, "application/app_store_team_id", teams[0])
+		msg += ", team " + teams[0]
+	if cfg.save(path) != OK:
+		return err("Cannot write %s." % path)
+	if path == "res://export_presets.cfg":
+		mark_dirty()
+		refresh_preflight()
+	return ok({"message": msg + "."})
+
+
 # ── ASC key adoption ──────────────────────────────────────────────────────────
 
 ## Apple names every downloaded key AuthKey_<KEYID>.p8 — the key id rides in
@@ -870,8 +970,61 @@ func set_asc_issuer(issuer: String) -> Dictionary:
 ## Team ID, fills it from the signed-in Xcode account (only when exactly one
 ## team is available — with several, choosing is the user's call).
 func apply_fix(id: String) -> Dictionary:
-	if id != "preset":
-		return err("No fix for '%s'." % id)
+	match id:
+		"preset":
+			return _fix_preset()
+		"templates":
+			return _fix_templates()
+	return err("No fix for '%s'." % id)
+
+
+## Download the official export-template pack for the running Godot version and
+## install it where the editor expects it — the same result as Manage Export
+## Templates → Download and Install, without the dialog.
+func _fix_templates() -> Dictionary:
+	if not _fix_proc.is_empty():
+		return err("A fix is already running.")
+	var v: Dictionary = Engine.get_version_info()
+	var url := templates_url(v)
+	if url == "":
+		return err("No direct download for non-stable Godot builds — use Editor → Manage Export Templates.")
+	var dest := templates_dir()
+	var cache := OS.get_cache_dir().path_join("build_kit")
+	var tpz := cache.path_join("templates.tpz")
+	var extract := cache.path_join("tpz_extract")
+	var shell := "curl -fL -sS -o %s %s && rm -rf %s && unzip -q %s -d %s && mkdir -p %s && ditto %s %s && rm -rf %s %s" % [
+		Exec.quote(tpz), Exec.quote(url),
+		Exec.quote(extract),
+		Exec.quote(tpz), Exec.quote(extract),
+		Exec.quote(dest),
+		Exec.quote(extract.path_join("templates")), Exec.quote(dest),
+		Exec.quote(extract), Exec.quote(tpz)]
+	var handle := Exec.spawn_shell(shell, cache.path_join("templates_install.log"))
+	if not handle.get("ok", false):
+		return err(str(handle.get("error", "spawn failed")))
+	_fix_proc = handle
+	_set_row("templates", "busy", "downloading + installing (~1 GB, several minutes)…")
+	log_line.emit("\n── templates install ──\n%s\n→ %s\n" % [url, dest])
+	return ok({"message": "Downloading export templates — the row updates when done."})
+
+
+func _poll_fix() -> void:
+	if _fix_proc.is_empty():
+		return
+	var tail: Dictionary = Exec.read_from(_fix_proc["log"], int(_fix_proc.get("offset", 0)))
+	if str(tail["text"]) != "":
+		_fix_proc["offset"] = tail["offset"]
+		log_line.emit(str(tail["text"]))
+	var code := Exec.exit_code(_fix_proc["exit_path"])
+	if code < 0:
+		return
+	_fix_proc = {}
+	log_line.emit("templates installed.\n" if code == 0
+		else "templates install FAILED (exit %d) — see above.\n" % code)
+	refresh_preflight()
+
+
+func _fix_preset() -> Dictionary:
 	var preset := load_ios_preset()
 	if preset.is_empty():
 		return err("No iOS preset to fix — create one in Project → Export first.")
