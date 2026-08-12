@@ -341,9 +341,12 @@ func _next_stage(paths: Dictionary = {}) -> void:
 		_finish({
 			"ok": true,
 			"title": "Uploaded to App Store Connect" if was_upload else "Signed .ipa exported",
-			"guidance": ("TestFlight will show the build under Processing for a few minutes — use 'TestFlight status' to poll it."
+			"guidance": ("1. Processing takes a few minutes — press 'TestFlight status' to poll\n2. When Ready: TestFlight tab → Internal Testing → ＋ → add a group with yourself as tester (first time only)\n3. iPhone: install the TestFlight app, sign in with the same Apple ID — the build appears there."
 				if was_upload else "The .ipa is in %s." % paths["dir"]),
-			"links": ([{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}] if was_upload else []),
+			"links": ([
+				{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"},
+				{"label": "TestFlight for iPhone", "url": "https://apps.apple.com/app/testflight/id899247664"},
+			] if was_upload else []),
 		})
 		return
 	var stage: Dictionary = _stages.pop_front()
@@ -431,8 +434,34 @@ func _poll_builds() -> void:
 	var builds: Array = result.get("builds", [])
 	if builds.is_empty():
 		log_line.emit("App record exists; no builds uploaded yet.\n")
+		return
 	for b in builds:
 		log_line.emit("build %s  %s  (%s)\n" % [b.get("version"), b.get("state"), str(b.get("uploaded"))])
+	# Surface the latest build's state as a status + next-step buttons, so
+	# "Ready to Test" arrives with the download/share walkthrough attached.
+	var latest: Dictionary = builds[0]
+	var app_id := str(result.get("app_id", ""))
+	var tf_url := ("https://appstoreconnect.apple.com/apps/%s/testflight/ios" % app_id
+		if app_id != "" else "https://appstoreconnect.apple.com/apps")
+	var links := [
+		{"label": "Open TestFlight tab", "url": tf_url},
+		{"label": "TestFlight for iPhone", "url": "https://apps.apple.com/app/testflight/id899247664"},
+	]
+	if str(latest.get("state", "")) == "VALID":
+		build_finished.emit({"ok": true,
+			"title": "Build %s is Ready to Test" % latest.get("version"),
+			"guidance": "1. ↗ Open TestFlight tab → Internal Testing → ＋ → add a group with yourself as tester (first time only; later builds land in the group automatically)\n2. iPhone: install the TestFlight app, sign in with the same Apple ID → Moveborne appears → Install.",
+			"links": links})
+	elif str(latest.get("state", "")) == "PROCESSING":
+		build_finished.emit({"ok": true,
+			"title": "Build %s still processing" % latest.get("version"),
+			"guidance": "Apple is scanning the build — usually a few minutes. Press 'TestFlight status' again shortly.",
+			"links": links})
+	else:
+		build_finished.emit({"ok": false,
+			"title": "Build %s: %s" % [latest.get("version"), latest.get("state")],
+			"guidance": "Apple rejected the binary in post-processing — details were emailed to your developer account address.",
+			"links": links})
 
 
 # ── Preflight ─────────────────────────────────────────────────────────────────

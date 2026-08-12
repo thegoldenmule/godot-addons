@@ -120,6 +120,7 @@ def main() -> None:
                     {
                         "ok": True,
                         "found": True,
+                        "app_id": app_id,
                         "builds": [
                             {
                                 "version": b["attributes"]["version"],
