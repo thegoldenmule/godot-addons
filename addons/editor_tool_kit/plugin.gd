@@ -69,7 +69,12 @@ func _register_settings() -> void:
 func install_downloaded_update(
 	zip_path: String, temp_dir: String, prefixes: Array, plugin_cfgs: Array
 ) -> void:
-	if _panel_root != null:
+	# Tear the panel down ONLY when etk itself is in the batch — the runner will
+	# disable + re-enable us then, rebuilding it. When only other addons update,
+	# our scripts never change (no reload risk) and the runner won't re-enable
+	# us, so an unconditional teardown here orphaned the panel: the "Editor Tool
+	# Kit tab disappears after updating another addon" bug.
+	if plugin_cfgs.has(_cfg_path()) and _panel_root != null:
 		remove_control_from_bottom_panel(_panel_root)
 		_panel_root.queue_free()
 		_panel_root = null
