@@ -166,6 +166,11 @@ func _initialize() -> void:
 	var reparsed := ServiceT.parse_ios_preset_text(created_text)
 	_check("created preset parses", reparsed.get("bundle_id", "") == "com.example.verify", created_text.left(200))
 	_check("created preset project-only", reparsed.get("export_project_only", false) == true)
+	# Godot's loader reads every base key with no default — all must be present.
+	for base_key in ["include_filter", "exclude_filter", "patches", "encryption_include_filters",
+			"encryption_exclude_filters", "seed", "encrypt_pck", "encrypt_directory",
+			"script_export_mode", "custom_features", "dedicated_server", "advanced_options"]:
+		_check("created preset has %s" % base_key, created_text.contains(base_key), created_text.left(400))
 	_check("created preset picked team", reparsed.get("team_id", "") == "TEAMPICKED1", created_text.left(200))
 	_check("create rejects bad bundle", not svc2.create_ios_preset("nodots", "", tmp_preset).get("ok", true))
 	svc2.free()

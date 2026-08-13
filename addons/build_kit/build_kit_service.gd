@@ -969,8 +969,23 @@ func create_ios_preset(bundle_id: String, team_id := "", path := "res://export_p
 	cfg.set_value(sec, "name", "iOS")
 	cfg.set_value(sec, "platform", "iOS")
 	cfg.set_value(sec, "runnable", true)
+	# Godot's preset loader get_value()s every base key with NO default — a
+	# preset missing any of these hard-errors at export time, so write the full
+	# set an editor-created preset would have.
+	cfg.set_value(sec, "advanced_options", false)
+	cfg.set_value(sec, "dedicated_server", false)
+	cfg.set_value(sec, "custom_features", "")
 	cfg.set_value(sec, "export_filter", "all_resources")
+	cfg.set_value(sec, "include_filter", "")
+	cfg.set_value(sec, "exclude_filter", "")
 	cfg.set_value(sec, "export_path", "build/ios/%s.ipa" % clean_app_name())
+	cfg.set_value(sec, "patches", PackedStringArray())
+	cfg.set_value(sec, "encryption_include_filters", "")
+	cfg.set_value(sec, "encryption_exclude_filters", "")
+	cfg.set_value(sec, "seed", 0)
+	cfg.set_value(sec, "encrypt_pck", false)
+	cfg.set_value(sec, "encrypt_directory", false)
+	cfg.set_value(sec, "script_export_mode", 2)
 	var opt := sec + ".options"
 	cfg.set_value(opt, "application/export_project_only", true)
 	cfg.set_value(opt, "architectures/arm64", true)
