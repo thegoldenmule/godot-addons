@@ -848,8 +848,9 @@ func _spawn_asc(command: String, bundle_id: String, log_name: String) -> Diction
 	var c := asc_credentials()
 	var helper := ProjectSettings.globalize_path(
 		get_script().resource_path.get_base_dir().path_join("asc_helper.py"))
+	# -B: no .pyc/__pycache__ droppings inside the vendored addon folder.
 	return Exec.spawn_logged(PackedStringArray([
-		"python3", helper,
+		"python3", "-B", helper,
 		"--key-path", c["key_path"], "--key-id", c["key_id"], "--issuer-id", c["issuer_id"],
 		command, bundle_id,
 	]), OS.get_cache_dir().path_join("build_kit").path_join(log_name))
