@@ -612,6 +612,7 @@ func refresh_preflight() -> void:
 	var rows: Array = []
 	rows.append(_check_xcode())
 	rows.append(_check_templates())
+	rows.append(_check_etc2())
 	rows.append(_check_preset())
 	rows.append(_check_account())
 	rows.append(_check_dist_cert())
@@ -673,6 +674,27 @@ func _check_templates() -> Dictionary:
 			"1. Press Fix — downloads the official %s template pack (~1 GB, several minutes) and installs it." % ver,
 			true)
 	return _row("templates", "iOS export templates", "ok", ver)
+
+
+## iOS export hard-requires ETC2/ASTC texture imports, and Godot reports the
+## violation with an EMPTY error list in headless runs — preflight is the only
+## place the user ever learns why. (Root-caused live: a fresh project fails
+## with "configuration errors:" and nothing after the colon.)
+func _check_etc2() -> Dictionary:
+	if bool(ProjectSettings.get_setting("rendering/textures/vram_compression/import_etc2_astc", false)):
+		return _row("etc2", "ETC2/ASTC textures", "ok", "enabled")
+	return _row("etc2", "ETC2/ASTC textures", "fail", "disabled",
+		"iOS export requires it (and Godot hides this error in headless builds).\n1. Press Fix — enables rendering/textures/vram_compression/import_etc2_astc (textures reimport once)\n2. Build again.",
+		true)
+
+
+func _fix_etc2() -> Dictionary:
+	ProjectSettings.set_setting("rendering/textures/vram_compression/import_etc2_astc", true)
+	var saved := ProjectSettings.save()
+	if saved != OK:
+		return err("Cannot write project.godot (error %d)." % saved)
+	refresh_preflight()
+	return ok({"message": "ETC2/ASTC imports enabled — the editor will reimport textures once."})
 
 
 func _check_preset() -> Dictionary:
@@ -1076,6 +1098,8 @@ func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 			return _fix_preset(str(opts.get("team_id", "")))
 		"templates":
 			return _fix_templates()
+		"etc2":
+			return _fix_etc2()
 		"app_record":
 			return _fix_bundle_id()
 	return err("No fix for '%s'." % id)

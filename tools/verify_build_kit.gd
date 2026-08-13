@@ -72,6 +72,8 @@ func _initialize() -> void:
 	_check("classify stale managed profile", stale["id"] == "profile_missing_cert", str(stale))
 	var generic := Classify.classify("something entirely novel")
 	_check("classify fallback", generic["id"] == "unknown")
+	var cfg_err := Classify.classify("ERROR: Cannot export project with preset \"iOS\" due to configuration errors:\n\n   at: _fs_changed")
+	_check("classify empty config errors", cfg_err["id"] == "export_config_errors", str(cfg_err))
 	_check("classify links passthrough", str(missing.get("links", [])).contains("appstoreconnect.apple.com/apps"), str(missing))
 	_check("classify fallback links empty", (generic.get("links", [1]) as Array).is_empty())
 	var order := Classify.classify("error: exportArchive Error Downloading App Information\n** EXPORT FAILED **")

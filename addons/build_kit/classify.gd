@@ -60,10 +60,16 @@ static func rules() -> Array:
 			"links": [{"label": "Open Identifiers", "url": "https://developer.apple.com/account/resources/identifiers/list"}],
 		},
 		{
+			"id": "export_config_errors",
+			"patterns": ["due to configuration errors"],
+			"title": "Godot rejected the export configuration",
+			"guidance": "Godot hides the specific reasons in headless runs (often an empty list, as above).\n1. Press Refresh in Preflight — the known causes (ETC2/ASTC imports off, incomplete preset) appear there with a Fix\n2. Still failing: open Project → Export in the editor — the dialog shows the actual errors.",
+		},
+		{
 			"id": "no_export_templates",
-			"patterns": ["No export template", "Cannot export project", "export templates"],
+			"patterns": ["No export template", "export templates"],
 			"title": "Godot export failed",
-			"guidance": "Check the iOS export templates are installed for this exact Godot version (Editor → Manage Export Templates), and that the iOS preset exists in Project → Export. The full Godot output is in the log above.",
+			"guidance": "Check the iOS export templates are installed for this exact Godot version (the preflight templates row has a Fix), and that the iOS preset exists. The full Godot output is in the log above.",
 		},
 		{
 			"id": "asc_auth",
