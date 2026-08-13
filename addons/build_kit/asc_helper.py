@@ -14,6 +14,7 @@ Usage:
 """
 import argparse
 import base64
+import datetime
 import json
 import subprocess
 import sys
@@ -96,6 +97,44 @@ def bundle_id_registered(token: str, identifier: str) -> bool:
     return any(b["attributes"].get("identifier") == identifier for b in reg.get("data", []))
 
 
+def find_apps(token: str, bundle_id: str) -> list:
+    """App records whose bundle id matches EXACTLY.
+
+    /v1/apps?filter[bundleId] is neither a guaranteed-unique nor a guaranteed-
+    exact match, and its result order is unspecified: duplicate and
+    since-deleted records for the same bundle id do come back. Taking data[0]
+    blindly can resolve to a ghost record carrying no builds — which downstream
+    is indistinguishable from "nothing uploaded yet".
+    """
+    data = get(token, "/v1/apps?filter[bundleId]=" + bundle_id + "&fields[apps]=name,bundleId")
+    return [a for a in data.get("data", []) if a["attributes"].get("bundleId") == bundle_id]
+
+
+def app_builds(token: str, app_id: str) -> list:
+    data = get(
+        token,
+        "/v1/builds?filter[app]="
+        + app_id
+        + "&sort=-uploadedDate&limit=5&fields[builds]=version,processingState,uploadedDate",
+    )
+    return [
+        {
+            "version": b["attributes"]["version"],
+            "state": b["attributes"]["processingState"],
+            "uploaded": b["attributes"].get("uploadedDate"),
+        }
+        for b in data.get("data", [])
+    ]
+
+
+def uploaded_at(build: dict) -> datetime.datetime:
+    """Sort key for a build's uploadedDate; offsets differ, so don't compare strings."""
+    try:
+        return datetime.datetime.fromisoformat(build.get("uploaded") or "")
+    except ValueError:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--key-path", required=True)
@@ -131,8 +170,7 @@ def main() -> None:
                     team = reg[0]["attributes"].get("seedId") or ""
             print(json.dumps({"ok": True, "team_id": team}))
         elif args.command == "check-app":
-            data = get(token, "/v1/apps?filter[bundleId]=" + args.arg + "&fields[apps]=name,bundleId")
-            apps = data.get("data", [])
+            apps = find_apps(token, args.arg)
             print(
                 json.dumps(
                     {
@@ -158,35 +196,19 @@ def main() -> None:
             print(json.dumps({"ok": True, "created": True,
                               "message": "Bundle id %s registered." % args.arg}))
         elif args.command == "builds":
-            data = get(token, "/v1/apps?filter[bundleId]=" + args.arg)
-            apps = data.get("data", [])
+            apps = find_apps(token, args.arg)
             if not apps:
                 print(json.dumps({"ok": True, "found": False, "builds": []}))
                 return
-            app_id = apps[0]["id"]
-            builds = get(
-                token,
-                "/v1/builds?filter[app]="
-                + app_id
-                + "&sort=-uploadedDate&limit=5&fields[builds]=version,processingState,uploadedDate",
-            )
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "found": True,
-                        "app_id": app_id,
-                        "builds": [
-                            {
-                                "version": b["attributes"]["version"],
-                                "state": b["attributes"]["processingState"],
-                                "uploaded": b["attributes"].get("uploadedDate"),
-                            }
-                            for b in builds.get("data", [])
-                        ],
-                    }
-                )
-            )
+            # Duplicates can survive exact matching, so let the builds themselves
+            # break the tie: the record holding the most recently uploaded build
+            # is the live one. Ghost records report nothing and lose.
+            app_id, builds = apps[0]["id"], []
+            for a in apps:
+                found = app_builds(token, a["id"])
+                if found and (not builds or uploaded_at(found[0]) > uploaded_at(builds[0])):
+                    app_id, builds = a["id"], found
+            print(json.dumps({"ok": True, "found": True, "app_id": app_id, "builds": builds}))
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:300]
         print(json.dumps({"ok": False, "error": "HTTP %d: %s" % (e.code, body)}))

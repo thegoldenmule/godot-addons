@@ -570,15 +570,29 @@ func _poll_builds() -> void:
 		return
 	var result := _parse_helper_json(Exec.read_all(_builds_proc["log"]))
 	_builds_proc = {}
+	# Every exit below MUST emit build_finished. The dock's status line is written
+	# ONLY by that signal, so a bare `return` leaves the previous poll's result on
+	# screen — a stale "Build N is Ready to Test", complete with green check, that
+	# reads as the current answer while actually being one or more builds behind.
+	var apps_link := [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}]
 	if not result.get("ok", false):
-		log_line.emit("ASC error: %s\n" % result.get("error", "unknown"))
+		var asc_error := str(result.get("error", "unknown"))
+		log_line.emit("ASC error: %s\n" % asc_error)
+		build_finished.emit({"ok": false, "title": "TestFlight status check failed",
+			"guidance": asc_error, "links": apps_link})
 		return
 	if not result.get("found", false):
 		log_line.emit("No app record yet for this bundle id.\n")
+		build_finished.emit({"ok": false, "title": "No app record for this bundle id",
+			"guidance": "Create the app in App Store Connect (or use the preflight app-record row), then check again.",
+			"links": apps_link})
 		return
 	var builds: Array = result.get("builds", [])
 	if builds.is_empty():
 		log_line.emit("App record exists; no builds uploaded yet.\n")
+		build_finished.emit({"ok": false, "title": "No builds uploaded yet",
+			"guidance": "The app record exists but App Store Connect lists no builds for it.",
+			"links": apps_link})
 		return
 	for b in builds:
 		log_line.emit("build %s  %s  (%s)\n" % [b.get("version"), b.get("state"), str(b.get("uploaded"))])

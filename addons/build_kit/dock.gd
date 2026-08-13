@@ -121,6 +121,12 @@ func _on_tf_status() -> void:
 	if not result.get("ok", false):
 		_status.text = str(result.get("error", ""))
 		_status.add_theme_color_override("font_color", Pal.ERROR)
+		return
+	# Retire the previous answer the moment a new probe starts — otherwise the
+	# old verdict sits there looking current for the whole round trip.
+	_status.text = "Checking TestFlight…"
+	_status.add_theme_color_override("font_color", Pal.TEXT)
+	_fill_links(_status_links, [])
 
 
 func _on_stage_changed(stage: String) -> void:
