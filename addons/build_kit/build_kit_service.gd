@@ -428,14 +428,18 @@ func start_build(upload := true) -> Dictionary:
 				pb, Exec.quote(plist), pb, Exec.quote(plist), pb, build_number, Exec.quote(plist)],
 		},
 		{
+			# Unsigned on purpose: the export stage does the only signing that
+			# matters (distribution), and distribution profiles need no
+			# registered devices — dev-signing the archive required a dev
+			# profile, which Apple refuses to mint for a device-less team.
 			"name": "archive",
 			"shell": Exec.command_line(PackedStringArray([
 				"xcodebuild", "archive",
 				"-project", paths["xcodeproj"], "-scheme", paths["app"],
 				"-configuration", "Release", "-destination", "generic/platform=iOS",
-				"-archivePath", paths["archive"], "-allowProvisioningUpdates",
-				"CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development",
-			]) + auth),
+				"-archivePath", paths["archive"],
+				"CODE_SIGNING_ALLOWED=NO",
+			])),
 		},
 		{
 			"name": "upload" if upload else "export_ipa",

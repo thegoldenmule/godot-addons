@@ -20,12 +20,13 @@ with its log streamed into the dock (cancellable, never blocks the editor):
 2. `PlistBuddy` patch: `ITSAppUsesNonExemptEncryption=false` (no "Missing
    Compliance" stall in TestFlight) + `CFBundleVersion` from an auto-bumped
    build number
-3. `xcodebuild archive` — automatic signing (`CODE_SIGN_STYLE=Automatic`,
-   development identity; overrides the distribution identity Godot pins into
-   the generated project, which otherwise conflicts)
+3. `xcodebuild archive` — **unsigned** (`CODE_SIGNING_ALLOWED=NO`): the export
+   stage does the only signing that matters, and skipping dev-signing here
+   removes the dev-profile requirement (Apple refuses to mint one for a team
+   with no registered devices)
 4. `xcodebuild -exportArchive` with `method: app-store-connect`,
-   `destination: upload` — signs with an Apple-managed distribution
-   certificate (cloud signing; no local distribution cert ever needed) and
+   `destination: upload` — signs everything with a distribution certificate
+   (cloud signing via the Xcode session or an App Manager API key) and
    uploads straight to App Store Connect
 
 "Build .ipa only" runs the same pipeline with `destination: export`.
