@@ -46,7 +46,8 @@ var _upload := false
 var _context := {}               # bundle_id / team_id for classify + guidance
 var _preset := {}                # parsed iOS preset (cached at build start)
 
-var _asc_proc := {}              # async app-record preflight probe
+var _asc_proc := {}              # async ASC preflight probe (see _asc_phase)
+var _asc_phase := "team"         # "team" = key validation → chains into "app" = app-record check
 var _asc_started_ms := 0
 var _builds_proc := {}           # async TestFlight-status probe
 var _fix_proc := {}              # async preflight fix (templates download/install)
@@ -770,7 +771,14 @@ func _check_asc_key() -> Dictionary:
 	if int(py["code"]) != 0:
 		return _row("asc_key", "App Store Connect API key", "warn", "python3 missing",
 			"The ASC probes need python3 (ships with the Xcode command-line tools): xcode-select --install")
-	return _row("asc_key", "App Store Connect API key", "ok", "key %s" % c["key_id"])
+	# Fully configured — validate that the key actually belongs to the preset's
+	# team before trusting any probe made with it (a wrong-team key answers
+	# every query truthfully about the WRONG team).
+	if _asc_proc.is_empty():
+		_asc_phase = "team"
+		_asc_proc = _spawn_asc("team-info", "-", "asc_team_info.log")
+		_asc_started_ms = Time.get_ticks_msec()
+	return _row("asc_key", "App Store Connect API key", "busy", "validating key %s…" % c["key_id"])
 
 
 func _check_app_record() -> Dictionary:
@@ -782,10 +790,15 @@ func _check_app_record() -> Dictionary:
 			"unknown (no API key)",
 			"Without an API key this is only verified at upload time — the upload error will carry the create-app steps if the record is missing.",
 			false, [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
-	if _asc_proc.is_empty():
-		_asc_proc = _spawn_asc("check-app", preset["bundle_id"], "asc_check_app.log")
-		_asc_started_ms = Time.get_ticks_msec()
-	return _row("app_record", "App Store Connect app record", "busy", "checking…")
+	return _row("app_record", "App Store Connect app record", "busy", "waiting for key validation…")
+
+
+## "Name (ID)" when the team is signed into Xcode, else the bare id.
+func _team_label(team_id: String) -> String:
+	for entry in list_teams():
+		if str(entry["id"]) == team_id and str(entry["name"]) != "":
+			return "%s (%s)" % [entry["name"], team_id]
+	return team_id
 
 
 func _check_devices() -> Dictionary:
@@ -831,12 +844,16 @@ func _poll_asc() -> void:
 		if Time.get_ticks_msec() - _asc_started_ms > 60000:
 			Exec.kill_tree(int(_asc_proc["pid"]))
 			_asc_proc = {}
-			_set_row("app_record", "warn", "check timed out", "Network problem reaching the App Store Connect API — Refresh to retry.")
+			var row_id := "asc_key" if _asc_phase == "team" else "app_record"
+			_set_row(row_id, "warn", "check timed out", "Network problem reaching the App Store Connect API — Refresh to retry.")
 		return
 	var result := _parse_helper_json(Exec.read_all(_asc_proc["log"]))
 	_asc_proc = {}
 	var preset := load_ios_preset()
 	var bundle := str(preset.get("bundle_id", ""))
+	if _asc_phase == "team":
+		_handle_team_info(result, preset)
+		return
 	if not result.get("ok", false):
 		_set_row("app_record", "warn", "check failed", "ASC API error: %s" % result.get("error", "unknown"))
 	elif result.get("found", false):
@@ -852,8 +869,46 @@ func _poll_asc() -> void:
 			true)
 	else:
 		_set_row("app_record", "fail", "missing for " + bundle,
-			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown\n4. SKU: any internal id. Then Refresh.\nIf you created it and this row stays red, the API key belongs to a different team — create a key under this app's team and drop its .p8 above." % bundle,
+			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown\n4. SKU: any internal id. Then Refresh." % bundle,
 			[{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
+
+
+## Phase-1 result: does the key's team match the preset's team? Only a match
+## unlocks the app-record probe — a wrong-team key answers every query
+## truthfully about the wrong team, so its results must never be shown.
+func _handle_team_info(result: Dictionary, preset: Dictionary) -> void:
+	var c := asc_credentials()
+	var expected := str(preset.get("team_id", ""))
+	var key_links := [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}]
+	if not result.get("ok", false):
+		var error := str(result.get("error", "unknown"))
+		if error.contains("401") or error.contains("NOT_AUTHORIZED"):
+			_set_row("asc_key", "fail", "key %s rejected" % c["key_id"],
+				"1. ↗ Create API key — the stored key is invalid or revoked; make a new one (role: App Manager)\n2. Drop the new .p8 on this panel\n3. Paste its Issuer ID and Save.", key_links)
+		else:
+			_set_row("asc_key", "warn", "validation failed", "ASC API error: %s" % error)
+		_set_row("app_record", "warn", "skipped (key not validated)")
+		return
+	var got := str(result.get("team_id", ""))
+	if expected != "" and got != "" and got != expected:
+		_set_row("asc_key", "fail",
+			"wrong team — key %s → %s" % [c["key_id"], _team_label(got)],
+			"This project targets %s, but the key belongs to %s.\n1. ↗ Create API key — first switch the team picker (top right of that page) to %s\n2. ＋ → any name, role: App Manager → Generate → Download\n3. Drop the new .p8 on this panel, paste that page's Issuer ID, Save." % [
+				_team_label(expected), _team_label(got), _team_label(expected)],
+			key_links)
+		_set_row("app_record", "warn", "blocked — wrong-team API key (fix the row above)")
+		return
+	var detail := "key %s (team unverified — no assets on the team yet)" % c["key_id"]
+	if got != "":
+		detail = "key %s (team %s)" % [c["key_id"], _team_label(got)]
+	_set_row("asc_key", "ok", detail)
+	if preset.is_empty():
+		_set_row("app_record", "warn", "needs a preset first")
+		return
+	_asc_phase = "app"
+	_asc_proc = _spawn_asc("check-app", str(preset["bundle_id"]), "asc_check_app.log")
+	_asc_started_ms = Time.get_ticks_msec()
+	_set_row("app_record", "busy", "checking…")
 
 
 func _set_row(id: String, status: String, detail: String, guidance := "", links: Array = [], fixable := false) -> void:

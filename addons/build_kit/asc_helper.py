@@ -101,12 +101,36 @@ def main() -> None:
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--issuer-id", required=True)
-    parser.add_argument("command", choices=["check-app", "builds", "ensure-bundle-id"])
+    parser.add_argument("command", choices=["check-app", "builds", "ensure-bundle-id", "team-info"])
     parser.add_argument("arg")
     args = parser.parse_args()
     try:
         token = make_token(args.key_path, args.key_id, args.issuer_id)
-        if args.command == "check-app":
+        if args.command == "team-info":
+            # Which team does this key belong to? Keys are team-scoped, but the
+            # API has no whoami — infer from team assets: a certificate's
+            # subject OU is the team id (authoritative); bundle-id seedId is
+            # the fallback. Empty team_id = team has no assets yet.
+            team = ""
+            certs = get(token, "/v1/certificates?limit=1").get("data", [])
+            if certs:
+                der = base64.b64decode(certs[0]["attributes"]["certificateContent"])
+                with tempfile.NamedTemporaryFile(suffix=".der") as tf:
+                    tf.write(der)
+                    tf.flush()
+                    subj = subprocess.run(
+                        ["/usr/bin/openssl", "x509", "-inform", "DER", "-in", tf.name,
+                         "-noout", "-subject"],
+                        capture_output=True, text=True).stdout
+                for part in subj.replace("subject=", "").split(","):
+                    if part.strip().startswith("OU"):
+                        team = part.strip().split("=", 1)[1].strip()
+            if not team:
+                reg = get(token, "/v1/bundleIds?limit=1").get("data", [])
+                if reg:
+                    team = reg[0]["attributes"].get("seedId") or ""
+            print(json.dumps({"ok": True, "team_id": team}))
+        elif args.command == "check-app":
             data = get(token, "/v1/apps?filter[bundleId]=" + args.arg + "&fields[apps]=name,bundleId")
             apps = data.get("data", [])
             print(
