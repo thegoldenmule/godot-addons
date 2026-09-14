@@ -127,14 +127,28 @@ static func read_all(log_path: String) -> String:
 ## Blocking run for sub-second probes ONLY (version checks, defaults read,
 ## adb devices -l). Returns {code, output}.
 static func run(args: PackedStringArray) -> Dictionary:
-	var out: Array = []
-	var code: int
 	if _is_windows():
-		# No shell needed here — a bare argv array has nothing to re-escape.
-		code = OS.execute(args[0], args.slice(1), out, true)
-	else:
-		code = OS.execute("/bin/zsh", ["-lc", command_line(args)], out, true)
+		return _run_blocking_windows(args)
+	var out: Array = []
+	var code := OS.execute("/bin/zsh", ["-lc", command_line(args)], out, true)
 	var text := ""
 	for chunk in out:
 		text += str(chunk)
 	return {"code": code, "output": text}
+
+
+# File redirection, not a piped OS.execute capture (see header: a piped probe
+# can hang on adb's forked server); block until the .exit sentinel lands.
+static func _run_blocking_windows(args: PackedStringArray) -> Dictionary:
+	var log_path := OS.get_cache_dir().path_join("build_kit") \
+		.path_join("probe_%d.log" % Time.get_ticks_usec())
+	var h := spawn_logged(args, log_path)
+	if not h["ok"]:
+		return {"code": -1, "output": ""}
+	while not FileAccess.file_exists(h["exit_path"]):
+		OS.delay_msec(20)
+	var result := {"code": exit_code(h["exit_path"]), "output": read_all(log_path)}
+	DirAccess.remove_absolute(h["exit_path"])
+	DirAccess.remove_absolute(h["exit_path"] + ".bat")
+	DirAccess.remove_absolute(log_path)
+	return result
