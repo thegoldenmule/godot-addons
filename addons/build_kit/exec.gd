@@ -65,6 +65,8 @@ static func spawn_shell(shell_line: String, log_path: String) -> Dictionary:
 		var script := "%s > %s 2>&1\r\n(echo %%ERRORLEVEL%% > %s)\r\n" % [
 			shell_line, quote(log_path), quote(exit_path)]
 		var bf := FileAccess.open(bat_path, FileAccess.WRITE)
+		if bf == null:
+			return {"ok": false, "error": "couldn't write build script %s (err %d)" % [bat_path, FileAccess.get_open_error()]}
 		bf.store_string(script)
 		bf.close()
 		pid = OS.create_process("cmd.exe", ["/d", "/c", bat_path])
