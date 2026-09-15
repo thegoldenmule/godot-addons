@@ -9,8 +9,9 @@ extends RefCounted
 ## editor thread. Short probes (version checks, `defaults read`, `adb
 ## devices`) may use the blocking run().
 ##
-## Shells out via /bin/zsh on macOS/Linux, cmd.exe on Windows, picked per
-## call via _is_windows() so every other function stays branch-free.
+## Shells out via cmd.exe on Windows and a POSIX shell elsewhere (zsh on
+## macOS, /bin/sh on Linux — zsh isn't guaranteed there), picked per call via
+## _is_windows()/_posix_shell() so every other function stays branch-free.
 ##
 ## Windows uses cmd.exe, not PowerShell: its `>`/`2>&1` is real file-handle
 ## redirection, immune to a lingering forked child (e.g. adb's own server)
@@ -18,6 +19,13 @@ extends RefCounted
 
 static func _is_windows() -> bool:
 	return OS.get_name() == "Windows"
+
+
+# zsh is macOS's default shell; elsewhere fall back to /bin/sh (POSIX and always
+# present — zsh isn't guaranteed on Linux). The wrapped scripts are plain POSIX
+# (subshell + `> 2>&1` + `echo $?`), so /bin/sh runs them fine.
+static func _posix_shell() -> String:
+	return "/bin/zsh" if OS.get_name() == "macOS" else "/bin/sh"
 
 
 ## Quote an argument literally for the platform's shell (POSIX ' -> '\'',
@@ -65,7 +73,7 @@ static func spawn_shell(shell_line: String, log_path: String) -> Dictionary:
 		# skip the exit-code sentinel write (the sentinel's existence = "finished").
 		var wrapped := "( %s ) > %s 2>&1; echo $? > %s" % [
 			shell_line, quote(log_path), quote(exit_path)]
-		pid = OS.create_process("/bin/zsh", ["-lc", wrapped])
+		pid = OS.create_process(_posix_shell(), ["-lc", wrapped])
 	if pid <= 0:
 		return {"ok": false, "error": "failed to spawn: " + shell_line}
 	return {"ok": true, "pid": pid, "log": log_path, "exit_path": exit_path, "offset": 0}
@@ -101,7 +109,7 @@ static func kill_tree(pid: int) -> void:
 		# taskkill's own /T (tree) + /F (force) do this natively, no shell needed.
 		OS.execute("taskkill", ["/T", "/F", "/PID", str(pid)], out, true)
 	else:
-		OS.execute("/bin/zsh", ["-c", "pkill -TERM -P %d; kill -TERM %d" % [pid, pid]], out, true)
+		OS.execute(_posix_shell(), ["-c", "pkill -TERM -P %d; kill -TERM %d" % [pid, pid]], out, true)
 
 
 ## Incremental log tail: read from byte offset, return {text, offset}.
@@ -130,7 +138,7 @@ static func run(args: PackedStringArray) -> Dictionary:
 	if _is_windows():
 		return _run_blocking_windows(args)
 	var out: Array = []
-	var code := OS.execute("/bin/zsh", ["-lc", command_line(args)], out, true)
+	var code := OS.execute(_posix_shell(), ["-lc", command_line(args)], out, true)
 	var text := ""
 	for chunk in out:
 		text += str(chunk)

@@ -177,7 +177,7 @@ registers it on first archive).
 | File | Role |
 |---|---|
 | `build_kit_service.gd` | preflight + pipeline state machine (headless-testable) |
-| `exec.gd` | detached process runner (log file + exit sentinel, poll/kill) — cmd.exe on Windows, `/bin/zsh` on macOS/Linux |
+| `exec.gd` | detached process runner (log file + exit sentinel, poll/kill) — cmd.exe on Windows, `/bin/zsh` on macOS, `/bin/sh` on Linux |
 | `classify.gd` | failure signatures → plain-language guidance |
 | `asc_helper.py` | App Store Connect API probe (stdlib-only; ES256 via openssl) |
 | `dock.gd` | the bottom-panel view |
