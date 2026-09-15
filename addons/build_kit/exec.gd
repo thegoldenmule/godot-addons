@@ -135,7 +135,8 @@ static func read_all(log_path: String) -> String:
 
 
 ## Blocking run for sub-second probes ONLY (version checks, defaults read,
-## adb devices -l). Returns {code, output}.
+## adb devices -l). Returns {code, output}. Pass a program + args; on Windows
+## the capture runs through a cmd .bat, so it can't host a nested `cmd /c "…"`.
 static func run(args: PackedStringArray) -> Dictionary:
 	if _is_windows():
 		return _run_blocking_windows(args)

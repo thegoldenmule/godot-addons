@@ -325,12 +325,13 @@ func _initialize() -> void:
 
 	# real run() round-trip — this path has no other coverage (the "adb
 	# devices" tests above are pure string-parsing over synthetic output).
-	var run_ok: Dictionary = Exec.run(PackedStringArray(["cmd.exe", "/c", "echo hi"])
-		if OS.get_name() == "Windows" else PackedStringArray(["echo", "hi"]))
-	_check("run captures output", int(run_ok["code"]) == 0 and str(run_ok["output"]).contains("hi"), str(run_ok))
-	var run_bad: Dictionary = Exec.run(PackedStringArray(["cmd.exe", "/c", "exit 7"])
-		if OS.get_name() == "Windows" else PackedStringArray(["sh", "-c", "exit 7"]))
-	_check("run nonzero exit code", int(run_bad["code"]) == 7, str(run_bad))
+	# Windows run() runs a program via a cmd .bat, so it can't host a nested
+	# `cmd /c "…"` — probe a real program (`where`) the way callers do.
+	var win := OS.get_name() == "Windows"
+	var run_ok: Dictionary = Exec.run(PackedStringArray(["where", "cmd"]) if win else PackedStringArray(["echo", "hi"]))
+	_check("run captures output", int(run_ok["code"]) == 0 and str(run_ok["output"]).contains("cmd" if win else "hi"), str(run_ok))
+	var run_bad: Dictionary = Exec.run(PackedStringArray(["where", "__no_such_xyz__"]) if win else PackedStringArray(["sh", "-c", "exit 7"]))
+	_check("run nonzero exit code", int(run_bad["code"]) != 0 if win else int(run_bad["code"]) == 7, str(run_bad))
 
 	# per-OS conventional-path picker (Android preflight groundwork)
 	_check("pick_by_os windows", ServiceT.pick_by_os("Windows", "W", "L", "M") == "W")
