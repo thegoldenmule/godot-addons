@@ -1080,9 +1080,17 @@ static func resolve_adb_path(sdk_path: String) -> String:
 ## from a ready ("device") one.
 static func parse_adb_devices(output: String) -> Array:
 	var devices: Array = []
+	var seen_header := false
 	for line in output.split("\n"):
 		var s := line.strip_edges()
-		if s.is_empty() or s.begins_with("List of devices"):
+		if not seen_header:
+			# skip everything until adb's device-list header — a cold server
+			# prints "* daemon … *" startup lines (on stderr, captured via 2>&1)
+			# before it
+			if s.begins_with("List of devices"):
+				seen_header = true
+			continue
+		if s.is_empty():
 			continue
 		var tokens := s.split(" ", false)
 		if tokens.size() < 2:

@@ -350,6 +350,10 @@ func _initialize() -> void:
 	_check("adb devices unauthorized state", str(adb_devices[1]["state"]) == "unauthorized", str(adb_devices))
 	_check("adb devices no model on unauthorized", str(adb_devices[1]["model"]) == "", str(adb_devices))
 	_check("adb devices empty output", ServiceT.parse_adb_devices("List of devices attached\n\n").is_empty())
+	# a cold adb server prepends "* daemon …" lines before the header; they must
+	# not parse as devices
+	var adb_cold := "* daemon not running; starting now at tcp:5037\n* daemon started successfully\nList of devices attached\nemulator-5554          device model:sdk_gphone64_arm64 transport_id:1\n"
+	_check("adb devices skips cold-start daemon noise", ServiceT.parse_adb_devices(adb_cold).size() == 1, str(ServiceT.parse_adb_devices(adb_cold)))
 
 	# debug keystore all-or-nothing grouping — the one branch worth pinning
 	# down given how unverified the exact rule is (see the function's doc
