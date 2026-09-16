@@ -368,6 +368,14 @@ func _initialize() -> void:
 		unauth_row.get("status", "") == "fail" and str(unauth_row.get("detail", "")).contains("none authorized"), str(unauth_row))
 	_check("device row: a ready device is ok",
 		dev_svc._check_android_devices(0, [{"serial": "emulator-5554", "state": "device", "model": "x"}]).get("status", "") == "ok")
+	# reconcile_device_selection drops a pick no longer among ready devices
+	# (unplugged) so it can't block a build while a valid one exists
+	var d_a := {"serial": "A", "state": "device", "model": ""}
+	var d_c := {"serial": "C", "state": "device", "model": ""}
+	_check("reconcile: empty pick takes first ready", dev_svc.reconcile_device_selection("", [d_a, d_c]) == "A")
+	_check("reconcile: valid pick preserved", dev_svc.reconcile_device_selection("C", [d_a, d_c]) == "C")
+	_check("reconcile: stale pick falls back to first ready", dev_svc.reconcile_device_selection("B", [d_a, d_c]) == "A")
+	_check("reconcile: no ready devices clears pick", dev_svc.reconcile_device_selection("A", []) == "")
 
 	# debug keystore all-or-nothing grouping — the one branch worth pinning
 	# down given how unverified the exact rule is (see the function's doc

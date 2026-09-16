@@ -169,8 +169,7 @@ func _android_settings_rows() -> Array:
 	var probe: Dictionary = service.query_adb_devices(sdk_path)
 	_devices = probe["devices"]
 	var ready := _ready_devices()
-	if _selected_device == "" and not ready.is_empty():
-		_selected_device = str(ready[0]["serial"])
+	_selected_device = service.reconcile_device_selection(_selected_device, ready)
 	return [
 		service._check_android_sdk(sdk_path),
 		service._check_android_jdk(_editor_setting(settings, ANDROID_JDK_KEY)),

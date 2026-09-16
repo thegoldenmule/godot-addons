@@ -1110,6 +1110,16 @@ func query_adb_devices(sdk_path: String) -> Dictionary:
 	return {"code": int(r["code"]), "devices": parse_adb_devices(str(r["output"]))}
 
 
+## Keep a device pick valid across refreshes: preserve it if still among the
+## ready devices, else fall back to the first ready one (or "" if none) — so a
+## pick that got unplugged can't block a build while a valid device exists.
+func reconcile_device_selection(current: String, ready: Array) -> String:
+	for d in ready:
+		if str(d["serial"]) == current:
+			return current
+	return str(ready[0]["serial"]) if not ready.is_empty() else ""
+
+
 ## Android's only build mode this pass IS a device install, so "no ready
 ## device" is a hard fail here (iOS's device row is a warn — TestFlight/.ipa
 ## export don't need a physical device). Classifies query_adb_devices()'s result.
