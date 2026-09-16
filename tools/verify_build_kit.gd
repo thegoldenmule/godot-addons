@@ -380,6 +380,31 @@ func _initialize() -> void:
 	_check("apk path valid", ServiceT.is_apk_export_path("build/android/game.apk"))
 	_check("apk path rejects blank", not ServiceT.is_apk_export_path(""))
 	_check("apk path rejects non-apk", not ServiceT.is_apk_export_path("build/android/game"))
+	# _extract_templates aborts with {ok:false} on a write failure — build a
+	# 1-entry zip, then force open==null by putting a dir where the file goes
+	var tpl_svc: Node = ServiceT.new()
+	var tmp := OS.get_environment("TEMP") if OS.get_name() == "Windows" else "/tmp"
+	var zpath := tmp.path_join("bk_tpl_test.zip")
+	var packer := ZIPPacker.new()
+	packer.open(zpath)
+	packer.start_file("templates/foo.txt")
+	packer.write_file("hi".to_utf8_buffer())
+	packer.close_file()
+	packer.close()
+	var okdest := tmp.path_join("bk_tpl_ok")
+	var reader := ZIPReader.new()
+	reader.open(zpath)
+	var okres: Dictionary = tpl_svc._extract_templates(reader, okdest)
+	reader.close()
+	_check("templates extract ok", okres.get("ok", false), str(okres))
+	_check("templates extract wrote the file", FileAccess.file_exists(okdest.path_join("foo.txt")))
+	var baddest := tmp.path_join("bk_tpl_bad")
+	DirAccess.make_dir_recursive_absolute(baddest.path_join("foo.txt"))
+	var reader2 := ZIPReader.new()
+	reader2.open(zpath)
+	var badres: Dictionary = tpl_svc._extract_templates(reader2, baddest)
+	reader2.close()
+	_check("templates extract fails when a file can't be written", not badres.get("ok", true), str(badres))
 
 	# debug keystore all-or-nothing grouping — the one branch worth pinning
 	# down given how unverified the exact rule is (see the function's doc

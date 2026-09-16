@@ -1568,6 +1568,20 @@ func _on_templates_downloaded(result: int, response_code: int, _headers: PackedS
 		log_line.emit("templates install FAILED — could not open downloaded archive.\n", platform)
 		refresh_preflight()
 		return
+	var extract := _extract_templates(reader, dest)
+	reader.close()
+	if not extract["ok"]:
+		log_line.emit("templates install FAILED — %s\n" % extract["error"], platform)
+		refresh_preflight()
+		return
+	DirAccess.remove_absolute(tpz)
+	log_line.emit("templates install finished.\n", platform)
+	refresh_preflight()
+
+
+## Extracts the archive's templates/ subtree into dest; aborts on the first
+## write failure with {ok:false, error}.
+func _extract_templates(reader: ZIPReader, dest: String) -> Dictionary:
 	for entry in reader.get_files():
 		var target := _templates_zip_target(entry, dest)
 		if target == "":
@@ -1575,13 +1589,13 @@ func _on_templates_downloaded(result: int, response_code: int, _headers: PackedS
 		DirAccess.make_dir_recursive_absolute(target.get_base_dir())
 		var f := FileAccess.open(target, FileAccess.WRITE)
 		if f == null:
-			continue
+			return {"ok": false, "error": "couldn't write %s (err %d)" % [target, FileAccess.get_open_error()]}
 		f.store_buffer(reader.read_file(entry))
+		var werr := f.get_error()
 		f.close()
-	reader.close()
-	DirAccess.remove_absolute(tpz)
-	log_line.emit("templates install finished.\n", platform)
-	refresh_preflight()
+		if werr != OK:
+			return {"ok": false, "error": "couldn't write %s (err %d)" % [target, werr]}
+	return {"ok": true, "error": ""}
 
 
 func _poll_fix() -> void:
