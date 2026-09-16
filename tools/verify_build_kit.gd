@@ -376,6 +376,10 @@ func _initialize() -> void:
 	_check("reconcile: valid pick preserved", dev_svc.reconcile_device_selection("C", [d_a, d_c]) == "C")
 	_check("reconcile: stale pick falls back to first ready", dev_svc.reconcile_device_selection("B", [d_a, d_c]) == "A")
 	_check("reconcile: no ready devices clears pick", dev_svc.reconcile_device_selection("A", []) == "")
+	# is_apk_export_path gates start_build_android + the preset Fix
+	_check("apk path valid", ServiceT.is_apk_export_path("build/android/game.apk"))
+	_check("apk path rejects blank", not ServiceT.is_apk_export_path(""))
+	_check("apk path rejects non-apk", not ServiceT.is_apk_export_path("build/android/game"))
 
 	# debug keystore all-or-nothing grouping — the one branch worth pinning
 	# down given how unverified the exact rule is (see the function's doc

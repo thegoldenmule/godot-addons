@@ -341,6 +341,10 @@ func load_preset(platform: String) -> Dictionary:
 	return preset
 
 
+static func is_apk_export_path(export_path: String) -> bool:
+	return export_path.ends_with(".apk")
+
+
 ## Absolute paths derived from the preset's export_path. Android needs only
 ## the shared core (out/dir/app/logs) — the rest is Xcode-project-specific.
 static func derive_paths(project_root: String, export_path: String, platform: String) -> Dictionary:
@@ -487,6 +491,8 @@ func start_build_android(sdk_path: String, serial := "") -> Dictionary:
 	_preset = load_preset("Android")
 	if _preset.is_empty():
 		return err("No Android export preset found. Create one in Project → Export (platform Android), then Refresh preflight.")
+	if not is_apk_export_path(str(_preset["export_path"])):
+		return err("The Android export preset needs an export path ending in .apk. Press Fix on the preflight 'Android export preset' row.")
 
 	var adb := resolve_adb_path(sdk_path)
 	var devices := parse_adb_devices(str(Exec.run(PackedStringArray([adb, "devices", "-l"]))["output"]))
@@ -1176,7 +1182,7 @@ func _check_android_preset() -> Dictionary:
 	var export_path := str(preset["export_path"])
 	if export_path == "":
 		problems.append("no export path")
-	elif not export_path.ends_with(".apk"):
+	elif not is_apk_export_path(export_path):
 		problems.append("export path must end in .apk")
 	var missing := _missing_base_keys(preset["section"])
 	if not missing.is_empty():
@@ -1200,7 +1206,7 @@ func _fix_android_preset() -> Dictionary:
 		return err("Cannot parse export_presets.cfg.")
 	var msgs := PackedStringArray()
 	var export_path := str(preset["export_path"])
-	if export_path == "" or not export_path.ends_with(".apk"):
+	if not is_apk_export_path(export_path):
 		var default_path := "build/android/%s.apk" % clean_app_name()
 		cfg.set_value(str(preset["section"]), "export_path", default_path)
 		msgs.append("export_path=" + default_path)
