@@ -355,6 +355,19 @@ func _initialize() -> void:
 	# not parse as devices
 	var adb_cold := "* daemon not running; starting now at tcp:5037\n* daemon started successfully\nList of devices attached\nemulator-5554          device model:sdk_gphone64_arm64 transport_id:1\n"
 	_check("adb devices skips cold-start daemon noise", ServiceT.parse_adb_devices(adb_cold).size() == 1, str(ServiceT.parse_adb_devices(adb_cold)))
+	# _check_android_devices is now a pure classifier over query_adb_devices()'s
+	# {code, devices} — test its branches directly (it used to spawn adb)
+	var dev_svc: Node = ServiceT.new()
+	_check("device row: nonzero adb code warns",
+		dev_svc._check_android_devices(1, []).get("status", "") == "warn")
+	_check("device row: no devices fails",
+		dev_svc._check_android_devices(0, []).get("detail", "") == "none")
+	var unauth: Array = [{"serial": "R58N", "state": "unauthorized", "model": ""}]
+	var unauth_row: Dictionary = dev_svc._check_android_devices(0, unauth)
+	_check("device row: connected but none ready fails",
+		unauth_row.get("status", "") == "fail" and str(unauth_row.get("detail", "")).contains("none authorized"), str(unauth_row))
+	_check("device row: a ready device is ok",
+		dev_svc._check_android_devices(0, [{"serial": "emulator-5554", "state": "device", "model": "x"}]).get("status", "") == "ok")
 
 	# debug keystore all-or-nothing grouping — the one branch worth pinning
 	# down given how unverified the exact rule is (see the function's doc

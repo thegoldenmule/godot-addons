@@ -1103,22 +1103,20 @@ static func parse_adb_devices(output: String) -> Array:
 	return devices
 
 
-## The dock's device-picker source (role of list_teams()).
-func list_adb_devices(sdk_path: String) -> Array:
+## One adb query returning {code, devices}; the dock feeds both the picker and
+## the Device row from it, so adb runs once per refresh instead of twice.
+func query_adb_devices(sdk_path: String) -> Dictionary:
 	var r: Dictionary = Exec.run(PackedStringArray([resolve_adb_path(sdk_path), "devices", "-l"]))
-	return parse_adb_devices(str(r["output"]))
+	return {"code": int(r["code"]), "devices": parse_adb_devices(str(r["output"]))}
 
 
 ## Android's only build mode this pass IS a device install, so "no ready
 ## device" is a hard fail here (iOS's device row is a warn — TestFlight/.ipa
-## export don't need a physical device).
-func _check_android_devices(sdk_path: String) -> Dictionary:
-	var adb := resolve_adb_path(sdk_path)
-	var r: Dictionary = Exec.run(PackedStringArray([adb, "devices", "-l"]))
-	if int(r["code"]) != 0:
+## export don't need a physical device). Classifies query_adb_devices()'s result.
+func _check_android_devices(code: int, devices: Array) -> Dictionary:
+	if code != 0:
 		return _row("android.devices", "Device", "warn", "adb unavailable",
 			"Needs a working Android SDK first — see the SDK row above.")
-	var devices := parse_adb_devices(str(r["output"]))
 	var ready: Array = devices.filter(func(d): return str(d["state"]) == "device")
 	if devices.is_empty():
 		return _row("android.devices", "Device", "fail", "none",

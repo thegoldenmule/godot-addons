@@ -166,7 +166,8 @@ static func _editor_setting(settings: EditorSettings, key: String) -> String:
 func _android_settings_rows() -> Array:
 	var settings := EditorInterface.get_editor_settings()
 	var sdk_path := _editor_setting(settings, ANDROID_SDK_KEY)
-	_devices = service.list_adb_devices(sdk_path)
+	var probe: Dictionary = service.query_adb_devices(sdk_path)
+	_devices = probe["devices"]
 	var ready := _ready_devices()
 	if _selected_device == "" and not ready.is_empty():
 		_selected_device = str(ready[0]["serial"])
@@ -177,7 +178,7 @@ func _android_settings_rows() -> Array:
 			_editor_setting(settings, ANDROID_KEYSTORE_KEY),
 			_editor_setting(settings, ANDROID_KEYSTORE_USER_KEY),
 			_editor_setting(settings, ANDROID_KEYSTORE_PASS_KEY)),
-		service._check_android_devices(sdk_path),
+		service._check_android_devices(int(probe["code"]), probe["devices"]),
 	]
 
 
