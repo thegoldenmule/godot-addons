@@ -32,15 +32,16 @@ const CONFIG_PATH := "res://build_kit.config.json"
 const ENV_PATHS := ["res://.env", "res://../.env"]
 
 signal preflight_changed(rows: Array)
-signal stage_changed(stage: String)
-signal log_line(text: String)
-signal build_finished(result: Dictionary)
+signal stage_changed(stage: String, platform: String)
+signal log_line(text: String, platform: String)
+signal build_finished(result: Dictionary, platform: String)
 
 var config := {}
 var preflight_rows: Array = []
 
 var _stages: Array = []          # queued {name, shell} dicts
 var _stage := ""                 # current stage name ("" = idle)
+var _active_platform := ""       # platform owning the current build ("" = idle)
 var _proc := {}                  # active Exec.spawn handle (+offset)
 var _upload := false
 var _context := {}               # bundle_id / team_id for classify + guidance
@@ -75,7 +76,19 @@ static func default_config() -> Dictionary:
 			"preset": "iOS",
 			"build_number": 1,
 		},
+		"android": {
+			"preset": "Android",
+			"version_code": 1,
+		},
 	}
+
+
+## Fields JSON parses as floats but that must round-trip as ints (CFBundleVersion
+## "2" not "2.0"; same for Android's versionCode).
+const INT_CONFIG_FIELDS := [
+	["ios", "build_number"],
+	["android", "version_code"],
+]
 
 
 func load_config() -> Dictionary:
@@ -89,9 +102,8 @@ func load_config() -> Dictionary:
 					config[key].merge(parsed[key], true)
 				else:
 					config[key] = parsed[key]
-	# JSON numbers parse as floats; keep the build number an int so it
-	# round-trips as one (CFBundleVersion "2", not "2.0").
-	config["ios"]["build_number"] = int(config["ios"].get("build_number", 1))
+	for pair in INT_CONFIG_FIELDS:
+		config[pair[0]][pair[1]] = int(config[pair[0]].get(pair[1], 1))
 	migrate_config_secrets_to_env()
 	return config
 
@@ -286,58 +298,71 @@ func migrate_config_secrets_to_env() -> Dictionary:
 
 # ── Preset ────────────────────────────────────────────────────────────────────
 
-## Parse export_presets.cfg text for the iOS preset. Returns {} when absent,
-## else {section, name, export_path, bundle_id, team_id, export_project_only}.
-static func parse_ios_preset_text(text: String, preset_name := "") -> Dictionary:
+## Parse export_presets.cfg text for a preset targeting `platform`. Returns {}
+## when absent, else {section, name, export_path} plus whatever fields that
+## platform's checks actually need on top. iOS needs bundle_id/team_id/
+## export_project_only (its pipeline runs xcodebuild itself and needs to
+## know the signing team). Android's pipeline does the whole build in one
+## Godot step with no signing field to validate here — nothing extra needed.
+static func parse_preset_text(text: String, platform: String, preset_name := "") -> Dictionary:
 	var cfg := ConfigFile.new()
 	if cfg.parse(text) != OK:
 		return {}
 	for section in cfg.get_sections():
 		if section.contains(".options"):
 			continue
-		if str(cfg.get_value(section, "platform", "")) != "iOS":
+		if str(cfg.get_value(section, "platform", "")) != platform:
 			continue
 		var name := str(cfg.get_value(section, "name", ""))
 		if preset_name != "" and name != preset_name:
 			continue
-		var opt := section + ".options"
-		return {
+		var out := {
 			"section": section,
 			"name": name,
 			"export_path": str(cfg.get_value(section, "export_path", "")),
-			"bundle_id": str(cfg.get_value(opt, "application/bundle_identifier", "")),
-			"team_id": str(cfg.get_value(opt, "application/app_store_team_id", "")),
-			"export_project_only": bool(cfg.get_value(opt, "application/export_project_only", false)),
 		}
+		if platform == "iOS":
+			var opt := section + ".options"
+			out["bundle_id"] = str(cfg.get_value(opt, "application/bundle_identifier", ""))
+			out["team_id"] = str(cfg.get_value(opt, "application/app_store_team_id", ""))
+			out["export_project_only"] = bool(cfg.get_value(opt, "application/export_project_only", false))
+		return out
 	return {}
 
 
-func load_ios_preset() -> Dictionary:
+func load_preset(platform: String) -> Dictionary:
 	if not FileAccess.file_exists("res://export_presets.cfg"):
 		return {}
 	var f := FileAccess.open("res://export_presets.cfg", FileAccess.READ)
-	var wanted := str(config.get("ios", {}).get("preset", "iOS"))
-	var preset := parse_ios_preset_text(f.get_as_text(), wanted)
+	var wanted := str(config.get(platform.to_lower(), {}).get("preset", platform))
+	var preset := parse_preset_text(f.get_as_text(), platform, wanted)
 	if preset.is_empty():
-		preset = parse_ios_preset_text(FileAccess.open("res://export_presets.cfg", FileAccess.READ).get_as_text())
+		preset = parse_preset_text(FileAccess.open("res://export_presets.cfg", FileAccess.READ).get_as_text(), platform)
 	return preset
 
 
-## Absolute paths derived from the preset's export_path.
-static func derive_paths(project_root: String, export_path: String) -> Dictionary:
+static func is_apk_export_path(export_path: String) -> bool:
+	return export_path.ends_with(".apk")
+
+
+## Absolute paths derived from the preset's export_path. Android needs only
+## the shared core (out/dir/app/logs) — the rest is Xcode-project-specific.
+static func derive_paths(project_root: String, export_path: String, platform: String) -> Dictionary:
 	var out_abs := (project_root.rstrip("/") + "/" + export_path).simplify_path()
 	var build_dir := out_abs.get_base_dir()
 	var app := out_abs.get_file().get_basename()
-	return {
+	var out := {
 		"out": out_abs,
 		"dir": build_dir,
 		"app": app,
-		"xcodeproj": build_dir.path_join(app + ".xcodeproj"),
-		"archive": build_dir.path_join(app + ".xcarchive"),
-		"info_plist": build_dir.path_join(app).path_join(app + "-Info.plist"),
-		"options_plist": build_dir.path_join("build_kit_export_options.plist"),
 		"logs": build_dir.path_join("logs"),
 	}
+	if platform == "iOS":
+		out["xcodeproj"] = build_dir.path_join(app + ".xcodeproj")
+		out["archive"] = build_dir.path_join(app + ".xcarchive")
+		out["info_plist"] = build_dir.path_join(app).path_join(app + "-Info.plist")
+		out["options_plist"] = build_dir.path_join("build_kit_export_options.plist")
+	return out
 
 
 static func make_export_options_xml(team_id: String, upload: bool) -> String:
@@ -376,7 +401,7 @@ func start_build(upload := true) -> Dictionary:
 	if is_busy():
 		return err("A build is already running (stage: %s)." % _stage)
 	load_config()
-	_preset = load_ios_preset()
+	_preset = load_preset("iOS")
 	if _preset.is_empty():
 		return err("No iOS export preset found. Create one in Project → Export (platform iOS), then Refresh preflight.")
 	if not _preset["export_project_only"]:
@@ -385,11 +410,12 @@ func start_build(upload := true) -> Dictionary:
 		return err("The iOS preset has no App Store Team ID. Use the preflight Fix button (or set application/app_store_team_id in Project → Export).")
 
 	var root := ProjectSettings.globalize_path("res://")
-	var paths := derive_paths(root, _preset["export_path"])
+	var paths := derive_paths(root, _preset["export_path"], "iOS")
 	var build_number := int(config["ios"].get("build_number", 1))
 	_context = {"bundle_id": _preset["bundle_id"], "team_id": _preset["team_id"],
 		"key_id": str(asc_credentials()["key_id"])}
 	_upload = upload
+	_active_platform = "ios"
 
 	# Auth choice: a logged-in Xcode session cloud-signs with full permission,
 	# so prefer it; API-key flags only when there is no session (headless/CI).
@@ -411,7 +437,7 @@ func start_build(upload := true) -> Dictionary:
 
 	var auth := _auth_flags() if use_key else PackedStringArray()
 	log_line.emit("auth: %s\n" % ("ASC API key %s" % _context["key_id"] if use_key
-		else "Xcode session (teams: %s)" % ", ".join(teams)))
+		else "Xcode session (teams: %s)" % ", ".join(teams)), _active_platform)
 	var pb := "/usr/libexec/PlistBuddy"
 	var plist: String = paths["info_plist"]
 	_stages = [
@@ -455,6 +481,54 @@ func start_build(upload := true) -> Dictionary:
 	return ok({"stages": _stages.size() + 1, "build_number": build_number})
 
 
+## Export a debug APK and adb install it. sdk_path/serial come from the dock
+## (EditorSettings and the device picker aren't reachable from here); device
+## state is re-checked fresh rather than trusted.
+func start_build_android(sdk_path: String, serial := "") -> Dictionary:
+	if is_busy():
+		return err("A build is already running (stage: %s)." % _stage)
+	load_config()
+	_preset = load_preset("Android")
+	if _preset.is_empty():
+		return err("No Android export preset found. Create one in Project → Export (platform Android), then Refresh preflight.")
+	if not is_apk_export_path(str(_preset["export_path"])):
+		return err("The Android export preset needs an export path ending in .apk. Press Fix on the preflight 'Android export preset' row.")
+
+	var adb := resolve_adb_path(sdk_path)
+	var devices := parse_adb_devices(str(Exec.run(PackedStringArray([adb, "devices", "-l"]))["output"]))
+	var ready: Array = devices.filter(func(d): return str(d["state"]) == "device")
+	if ready.is_empty():
+		return err("No authorized Android device/emulator connected. See the preflight Device row.")
+	var target := ""
+	if ready.size() == 1:
+		target = str(ready[0]["serial"])
+	else:
+		var matches: Array = ready.filter(func(d): return str(d["serial"]) == serial)
+		if matches.is_empty():
+			return err("%d devices connected — pick one in the preflight Device row." % ready.size())
+		target = serial
+
+	var root := ProjectSettings.globalize_path("res://")
+	var paths := derive_paths(root, _preset["export_path"], "Android")
+	_context = {}
+	_active_platform = "android"
+	_stages = [
+		{
+			"name": "export",
+			"shell": Exec.command_line(PackedStringArray([
+				OS.get_executable_path(), "--headless", "--path", root,
+				"--export-debug", _preset["name"], paths["out"],
+			])),
+		},
+		{
+			"name": "install",
+			"shell": Exec.command_line(PackedStringArray([adb, "-s", target, "install", "-r", paths["out"]])),
+		},
+	]
+	_next_stage(paths)
+	return ok({"stages": _stages.size() + 1})
+
+
 func cancel() -> void:
 	if _proc.has("pid"):
 		Exec.kill_tree(int(_proc["pid"]))
@@ -477,22 +551,26 @@ func _auth_flags() -> PackedStringArray:
 func _next_stage(paths: Dictionary = {}) -> void:
 	if paths.is_empty():
 		var root := ProjectSettings.globalize_path("res://")
-		paths = derive_paths(root, _preset["export_path"])
+		paths = derive_paths(root, _preset["export_path"], "iOS" if _active_platform == "ios" else "Android")
 	if _stages.is_empty():
-		var was_upload := _upload
-		if was_upload:
-			config["ios"]["build_number"] = int(config["ios"].get("build_number", 1)) + 1
-			save_config()
-		_finish({
-			"ok": true,
-			"title": "Uploaded to App Store Connect" if was_upload else "Signed .ipa exported",
-			"guidance": ("1. Processing takes a few minutes — press 'TestFlight status' to poll\n2. When Ready: TestFlight tab → Internal Testing → ＋ → add a group with yourself as tester (first time only)\n3. iPhone: install the TestFlight app, sign in with the same Apple ID — the build appears there."
-				if was_upload else "The .ipa is in %s." % paths["dir"]),
-			"links": ([
-				{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"},
-				{"label": "TestFlight for iPhone", "url": "https://apps.apple.com/app/testflight/id899247664"},
-			] if was_upload else []),
-		})
+		if _active_platform == "ios":
+			var was_upload := _upload
+			if was_upload:
+				config["ios"]["build_number"] = int(config["ios"].get("build_number", 1)) + 1
+				save_config()
+			_finish({
+				"ok": true,
+				"title": "Uploaded to App Store Connect" if was_upload else "Signed .ipa exported",
+				"guidance": ("1. Processing takes a few minutes — press 'TestFlight status' to poll\n2. When Ready: TestFlight tab → Internal Testing → ＋ → add a group with yourself as tester (first time only)\n3. iPhone: install the TestFlight app, sign in with the same Apple ID — the build appears there."
+					if was_upload else "The .ipa is in %s." % paths["dir"]),
+				"links": ([
+					{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"},
+					{"label": "TestFlight for iPhone", "url": "https://apps.apple.com/app/testflight/id899247664"},
+				] if was_upload else []),
+			})
+		else:
+			_finish({"ok": true, "title": "Installed on device",
+				"guidance": "The APK is installed — check the device."})
 		return
 	var stage: Dictionary = _stages.pop_front()
 	_stage = stage["name"]
@@ -501,8 +579,24 @@ func _next_stage(paths: Dictionary = {}) -> void:
 		_finish({"ok": false, "stage": _stage, "title": "Spawn failed", "guidance": str(handle["error"])})
 		return
 	_proc = handle
-	log_line.emit("\n── %s ──\n$ %s\n" % [_stage, stage["shell"]])
-	stage_changed.emit(_stage)
+	log_line.emit("\n── %s ──\n$ %s\n" % [_stage, stage["shell"]], _active_platform)
+	stage_changed.emit(_stage, _active_platform)
+
+
+## Godot's Android export can exit 0 while only WARNING that apksigner is
+## missing, leaving an unsigned APK — the four strings it emits for that.
+const APKSIGNER_WARNING_SIGNATURES := [
+	"'apksigner' could not be found",
+	"'apksigner' returned with error",
+	"'apksigner' verification of APK failed",
+	"All 'apksigner' tools located in Android SDK 'build-tools' directory failed",
+]
+
+static func apksigner_warning_signature(log_text: String) -> String:
+	for sig in APKSIGNER_WARNING_SIGNATURES:
+		if log_text.contains(sig):
+			return sig
+	return ""
 
 
 func _poll_pipeline() -> void:
@@ -511,7 +605,7 @@ func _poll_pipeline() -> void:
 	var tail: Dictionary = Exec.read_from(_proc["log"], int(_proc["offset"]))
 	if str(tail["text"]) != "":
 		_proc["offset"] = tail["offset"]
-		log_line.emit(str(tail["text"]))
+		log_line.emit(str(tail["text"]), _active_platform)
 	var code := Exec.exit_code(_proc["exit_path"])
 	if code < 0:
 		if not Exec.is_running(int(_proc["pid"])) and str(tail["text"]) == "":
@@ -521,10 +615,18 @@ func _poll_pipeline() -> void:
 		return
 	var log_path := str(_proc["log"])
 	_proc = {}
+	if code == 0 and _active_platform == "android" and _stage == "export":
+		var warning := apksigner_warning_signature(Exec.read_all(log_path))
+		if warning != "":
+			_stages = []
+			_finish({"ok": false, "stage": _stage, "title": "APK export produced an unsigned build",
+				"guidance": "Godot's export succeeded but couldn't sign the APK (%s). See the Android SDK preflight row — apksigner ships in the SDK's build-tools." % warning,
+				"log": log_path})
+			return
 	if code == 0:
 		_next_stage()
 		return
-	var diagnosis := Classify.classify(Exec.read_all(log_path), _context)
+	var diagnosis := Classify.classify(Exec.read_all(log_path), _context, _active_platform)
 	diagnosis["ok"] = false
 	diagnosis["stage"] = _stage
 	diagnosis["log"] = log_path
@@ -533,14 +635,16 @@ func _poll_pipeline() -> void:
 
 
 func _finish(result: Dictionary) -> void:
+	var platform := _active_platform
 	_stage = ""
+	_active_platform = ""
 	_proc = {}
-	build_finished.emit(result)
+	build_finished.emit(result, platform)
 	if result.get("ok", false):
-		log_line.emit("\n✓ %s\n%s\n" % [result.get("title", ""), result.get("guidance", "")])
+		log_line.emit("\n✓ %s\n%s\n" % [result.get("title", ""), result.get("guidance", "")], platform)
 	else:
-		log_line.emit("\n✗ %s\n%s\n" % [result.get("title", ""), result.get("guidance", "")])
-	stage_changed.emit("")
+		log_line.emit("\n✗ %s\n%s\n" % [result.get("title", ""), result.get("guidance", "")], platform)
+	stage_changed.emit("", platform)
 
 
 # ── TestFlight status (async ASC probe) ───────────────────────────────────────
@@ -550,7 +654,7 @@ func check_testflight_status() -> Dictionary:
 		return err("Needs an App Store Connect API key (see the preflight ASC row).")
 	if not _builds_proc.is_empty():
 		return err("Already checking.")
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	if preset.is_empty():
 		return err("No iOS preset.")
 	_builds_proc = _spawn_asc("builds", preset["bundle_id"], "asc_builds.log")
@@ -558,7 +662,7 @@ func check_testflight_status() -> Dictionary:
 		var e := str(_builds_proc.get("error", "spawn failed"))
 		_builds_proc = {}
 		return err(e)
-	log_line.emit("\n── TestFlight status ──\n")
+	log_line.emit("\n── TestFlight status ──\n", "ios")
 	return ok()
 
 
@@ -577,25 +681,25 @@ func _poll_builds() -> void:
 	var apps_link := [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}]
 	if not result.get("ok", false):
 		var asc_error := str(result.get("error", "unknown"))
-		log_line.emit("ASC error: %s\n" % asc_error)
+		log_line.emit("ASC error: %s\n" % asc_error, "ios")
 		build_finished.emit({"ok": false, "title": "TestFlight status check failed",
-			"guidance": asc_error, "links": apps_link})
+			"guidance": asc_error, "links": apps_link}, "ios")
 		return
 	if not result.get("found", false):
-		log_line.emit("No app record yet for this bundle id.\n")
+		log_line.emit("No app record yet for this bundle id.\n", "ios")
 		build_finished.emit({"ok": false, "title": "No app record for this bundle id",
 			"guidance": "Create the app in App Store Connect (or use the preflight app-record row), then check again.",
-			"links": apps_link})
+			"links": apps_link}, "ios")
 		return
 	var builds: Array = result.get("builds", [])
 	if builds.is_empty():
-		log_line.emit("App record exists; no builds uploaded yet.\n")
+		log_line.emit("App record exists; no builds uploaded yet.\n", "ios")
 		build_finished.emit({"ok": false, "title": "No builds uploaded yet",
 			"guidance": "The app record exists but App Store Connect lists no builds for it.",
-			"links": apps_link})
+			"links": apps_link}, "ios")
 		return
 	for b in builds:
-		log_line.emit("build %s  %s  (%s)\n" % [b.get("version"), b.get("state"), str(b.get("uploaded"))])
+		log_line.emit("build %s  %s  (%s)\n" % [b.get("version"), b.get("state"), str(b.get("uploaded"))], "ios")
 	# Surface the latest build's state as a status + next-step buttons, so
 	# "Ready to Test" arrives with the download/share walkthrough attached.
 	var latest: Dictionary = builds[0]
@@ -610,17 +714,17 @@ func _poll_builds() -> void:
 		build_finished.emit({"ok": true,
 			"title": "Build %s is Ready to Test" % latest.get("version"),
 			"guidance": "1. ↗ Open TestFlight tab → Internal Testing → ＋ → add a group with yourself as tester (first time only; later builds land in the group automatically)\n2. iPhone: install the TestFlight app, sign in with the same Apple ID → Moveborne appears → Install.",
-			"links": links})
+			"links": links}, "ios")
 	elif str(latest.get("state", "")) == "PROCESSING":
 		build_finished.emit({"ok": true,
 			"title": "Build %s still processing" % latest.get("version"),
 			"guidance": "Apple is scanning the build — usually a few minutes. Press 'TestFlight status' again shortly.",
-			"links": links})
+			"links": links}, "ios")
 	else:
 		build_finished.emit({"ok": false,
 			"title": "Build %s: %s" % [latest.get("version"), latest.get("state")],
 			"guidance": "Apple rejected the binary in post-processing — details were emailed to your developer account address.",
-			"links": links})
+			"links": links}, "ios")
 
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
@@ -637,6 +741,8 @@ func refresh_preflight() -> void:
 	rows.append(_check_asc_key())
 	rows.append(_check_app_record())
 	rows.append(_check_devices())
+	rows.append(_check_android_templates())
+	rows.append(_check_android_preset())
 	preflight_rows = rows
 	preflight_changed.emit(rows)
 
@@ -649,10 +755,10 @@ static func _row(id: String, label: String, status: String, detail := "", guidan
 func _check_xcode() -> Dictionary:
 	var r: Dictionary = Exec.run(PackedStringArray(["xcodebuild", "-version"]))
 	if int(r["code"]) != 0:
-		return _row("xcode", "Xcode", "fail", "",
+		return _row("ios.xcode", "Xcode", "fail", "",
 			"Install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app",
 			false, [{"label": "Xcode on the App Store", "url": "https://apps.apple.com/app/xcode/id497799835"}])
-	return _row("xcode", "Xcode", "ok", str(r["output"]).split("\n")[0].strip_edges())
+	return _row("ios.xcode", "Xcode", "ok", str(r["output"]).split("\n")[0].strip_edges())
 
 
 ## Godot's version strings omit a zero patch: 4.6.0 → "4.6", 4.7.1 → "4.7.1".
@@ -686,12 +792,12 @@ func _check_templates() -> Dictionary:
 	var ver := version_tag(v) + "." + str(v["status"])
 	if not FileAccess.file_exists(templates_dir().path_join("ios.zip")):
 		if templates_url(v) == "":
-			return _row("templates", "iOS export templates", "fail", ver,
+			return _row("ios.templates", "iOS export templates", "fail", ver,
 				"1. Editor → Manage Export Templates → Download and Install (no direct download for non-stable builds).")
-		return _row("templates", "iOS export templates", "fail", ver,
+		return _row("ios.templates", "iOS export templates", "fail", ver,
 			"1. Press Fix — downloads the official %s template pack (~1 GB, several minutes) and installs it." % ver,
 			true)
-	return _row("templates", "iOS export templates", "ok", ver)
+	return _row("ios.templates", "iOS export templates", "ok", ver)
 
 
 ## iOS export hard-requires ETC2/ASTC texture imports, and Godot reports the
@@ -702,7 +808,7 @@ func _check_etc2() -> Dictionary:
 	if bool(ProjectSettings.get_setting("rendering/textures/vram_compression/import_etc2_astc", false)):
 		return _row("etc2", "ETC2/ASTC textures", "ok", "enabled")
 	return _row("etc2", "ETC2/ASTC textures", "fail", "disabled",
-		"iOS export requires it (and Godot hides this error in headless builds).\n1. Press Fix — enables rendering/textures/vram_compression/import_etc2_astc (textures reimport once)\n2. Build again.",
+		"Both iOS and Android export require it. Godot hides this error in headless iOS builds; Android's own export reports it directly.\n1. Press Fix — enables rendering/textures/vram_compression/import_etc2_astc (textures reimport once)\n2. Build again.",
 		true)
 
 
@@ -716,9 +822,9 @@ func _fix_etc2() -> Dictionary:
 
 
 func _check_preset() -> Dictionary:
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	if preset.is_empty():
-		return _row("preset", "iOS export preset", "fail", "",
+		return _row("ios.preset", "iOS export preset", "fail", "",
 			"1. Enter the bundle id below (reverse-DNS, e.g. com.studio.game)\n2. Pick your team\n3. Press Create preset.")
 	var problems := PackedStringArray()
 	if not preset["export_project_only"]:
@@ -730,8 +836,8 @@ func _check_preset() -> Dictionary:
 		problems.append("%d missing base keys" % missing.size())
 	var detail := "%s → %s" % [preset["name"], preset["bundle_id"]]
 	if problems.is_empty():
-		return _row("preset", "iOS export preset", "ok", detail)
-	return _row("preset", "iOS export preset", "warn",
+		return _row("ios.preset", "iOS export preset", "ok", detail)
+	return _row("ios.preset", "iOS export preset", "warn",
 		detail + " (" + ", ".join(problems) + ")",
 		"1. Pick your team below\n2. Press Fix.", true)
 
@@ -778,18 +884,18 @@ func _check_account() -> Dictionary:
 	var teams := parse_teams(str(r["output"]))
 	if int(r["code"]) != 0 or teams.is_empty():
 		var status := "warn" if has_asc_key() else "fail"
-		return _row("account", "Xcode account", status, "no signed-in teams",
+		return _row("ios.account", "Xcode account", status, "no signed-in teams",
 			"Sign into Xcode (Xcode → Settings → Accounts → ＋). Not needed once an ASC API key is configured — cloud signing then works headless.",
 			false, [{"label": "Apple Developer account", "url": "https://developer.apple.com/account"}])
-	return _row("account", "Xcode account", "ok", "teams: " + ", ".join(teams))
+	return _row("ios.account", "Xcode account", "ok", "teams: " + ", ".join(teams))
 
 
 func _check_dist_cert() -> Dictionary:
 	var r: Dictionary = Exec.run(PackedStringArray(["security", "find-identity", "-v", "-p", "codesigning"]))
 	var out := str(r["output"])
 	if out.contains("Apple Distribution") or out.contains("iOS Distribution"):
-		return _row("dist_cert", "Distribution certificate", "ok", "in keychain")
-	return _row("dist_cert", "Distribution certificate", "warn", "not in keychain",
+		return _row("ios.dist_cert", "Distribution certificate", "ok", "in keychain")
+	return _row("ios.dist_cert", "Distribution certificate", "warn", "not in keychain",
 		"1. Xcode → Settings → Accounts → select your team\n2. Manage Certificates… → ＋ (bottom-left) → Apple Distribution\n3. Refresh here.",
 		false, [{"label": "Open Xcode", "url": "/Applications/Xcode.app"}])
 
@@ -798,21 +904,21 @@ func _check_asc_key() -> Dictionary:
 	var c := asc_credentials()
 	var links := [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}]
 	if c["key_id"] == "" and c["key_path"] == "":
-		return _row("asc_key", "App Store Connect API key", "warn", "not configured",
+		return _row("ios.asc_key", "App Store Connect API key", "warn", "not configured",
 			"1. ↗ Create API key → ＋ → any name, role: App Manager → Generate\n2. Download the .p8, then drop it on this panel (or Browse…)\n3. Copy the Issuer ID from the top of that page into the field below and Save",
 			false, links)
 	if c["key_path"] == "" or not FileAccess.file_exists(c["key_path"]):
-		return _row("asc_key", "App Store Connect API key", "fail", c["key_path"],
+		return _row("ios.asc_key", "App Store Connect API key", "fail", c["key_path"],
 			"The key file is missing — re-drop the downloaded AuthKey_%s.p8 onto this panel (or Browse…)." % c["key_id"],
 			false, links)
 	if c["issuer_id"] == "":
-		return _row("asc_key", "App Store Connect API key", "warn",
+		return _row("ios.asc_key", "App Store Connect API key", "warn",
 			"key %s — missing Issuer ID" % c["key_id"],
 			"Nearly there: copy the Issuer ID (top of the API-keys page, it has a Copy button) into the field below and Save.",
 			false, links)
 	var py: Dictionary = Exec.run(PackedStringArray(["command", "-v", "python3"]))
 	if int(py["code"]) != 0:
-		return _row("asc_key", "App Store Connect API key", "warn", "python3 missing",
+		return _row("ios.asc_key", "App Store Connect API key", "warn", "python3 missing",
 			"The ASC probes need python3 (ships with the Xcode command-line tools): xcode-select --install")
 	# Fully configured — validate that the key actually belongs to the preset's
 	# team before trusting any probe made with it (a wrong-team key answers
@@ -821,19 +927,19 @@ func _check_asc_key() -> Dictionary:
 		_asc_phase = "team"
 		_asc_proc = _spawn_asc("team-info", "-", "asc_team_info.log")
 		_asc_started_ms = Time.get_ticks_msec()
-	return _row("asc_key", "App Store Connect API key", "busy", "validating key %s…" % c["key_id"])
+	return _row("ios.asc_key", "App Store Connect API key", "busy", "validating key %s…" % c["key_id"])
 
 
 func _check_app_record() -> Dictionary:
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	if preset.is_empty():
-		return _row("app_record", "App Store Connect app record", "warn", "needs a preset first")
+		return _row("ios.app_record", "App Store Connect app record", "warn", "needs a preset first")
 	if not has_asc_key():
-		return _row("app_record", "App Store Connect app record", "warn",
+		return _row("ios.app_record", "App Store Connect app record", "warn",
 			"unknown (no API key)",
 			"Without an API key this is only verified at upload time — the upload error will carry the create-app steps if the record is missing.",
 			false, [{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
-	return _row("app_record", "App Store Connect app record", "busy", "waiting for key validation…")
+	return _row("ios.app_record", "App Store Connect app record", "busy", "waiting for key validation…")
 
 
 ## "Name (ID)" when the team is signed into Xcode, else the bare id.
@@ -851,11 +957,272 @@ func _check_devices() -> Dictionary:
 		if line.contains("available"):
 			available += 1
 	if int(r["code"]) != 0:
-		return _row("devices", "Paired device", "warn", "devicectl unavailable")
+		return _row("ios.devices", "Paired device", "warn", "devicectl unavailable")
 	if available == 0:
-		return _row("devices", "Paired device", "warn", "none",
+		return _row("ios.devices", "Paired device", "warn", "none",
 			"Only needed for direct on-device installs — TestFlight builds don't require one. Pair via Xcode → Window → Devices and Simulators.")
-	return _row("devices", "Paired device", "ok", "%d available" % available)
+	return _row("ios.devices", "Paired device", "ok", "%d available" % available)
+
+
+# ── Android preflight (new checks; not wired into refresh_preflight() yet) ────
+
+## The same .tpz download contains templates for every platform — just a
+## different file to check for here (android_debug.apk, not ios.zip). Only
+## that one matters this pass; android_release.apk/source.zip are for
+## AAB/Gradle Build, both deferred.
+func _check_android_templates() -> Dictionary:
+	var v: Dictionary = Engine.get_version_info()
+	var ver := version_tag(v) + "." + str(v["status"])
+	if not FileAccess.file_exists(templates_dir().path_join("android_debug.apk")):
+		if templates_url(v) == "":
+			return _row("android.templates", "Android export templates", "fail", ver,
+				"1. Editor → Manage Export Templates → Download and Install (no direct download for non-stable builds).")
+		return _row("android.templates", "Android export templates", "fail", ver,
+			"1. Press Fix — downloads the official %s template pack (~1 GB, several minutes) and installs it." % ver,
+			true)
+	return _row("android.templates", "Android export templates", "ok", ver)
+
+
+## sdk_path is Editor Settings' android_sdk_path, fetched fresh by the dock
+## each refresh (this service can't read EditorSettings itself). Fixable
+## only when the conventional install location has something to point at;
+## `fix_value` carries the resolved path for the dock to write directly.
+func _check_android_sdk(sdk_path: String) -> Dictionary:
+	if sdk_path != "" and DirAccess.dir_exists_absolute(sdk_path):
+		return _row("android.sdk", "Android SDK", "ok", sdk_path)
+	var conventional := android_sdk_conventional_path()
+	if DirAccess.dir_exists_absolute(conventional):
+		var row := _row("android.sdk", "Android SDK", "warn",
+			_toolchain_path_detail(sdk_path) + " — found at " + conventional,
+			"1. Press Fix — points Editor Settings at the SDK found here\n2. Refresh preflight.",
+			true)
+		row["fix_value"] = conventional
+		return row
+	return _row("android.sdk", "Android SDK", "fail", _toolchain_path_detail(sdk_path),
+		"A valid Android SDK path is required in Editor Settings.\n1. Install Android Studio (it bundles the SDK) or the standalone command-line tools\n2. Editor → Editor Settings → Export → Android → Android SDK Path\n3. Refresh preflight.",
+		false, [{"label": "Android Studio", "url": "https://developer.android.com/studio"}])
+
+
+## jdk_path is Editor Settings' java_sdk_path, fetched fresh by the dock
+## (this service can't read EditorSettings itself). Falls back to
+## JAVA_HOME, then Android Studio's bundled runtime, before failing — a
+## fixable row's `fix_value` is whichever of those two the dock should write.
+func _check_android_jdk(jdk_path: String) -> Dictionary:
+	if jdk_path != "" and DirAccess.dir_exists_absolute(jdk_path):
+		return _row("android.jdk", "Java SDK", "ok", jdk_path)
+	var java_home := OS.get_environment("JAVA_HOME")
+	if java_home != "" and DirAccess.dir_exists_absolute(java_home):
+		var row := _row("android.jdk", "Java SDK",
+			"warn", _toolchain_path_detail(jdk_path) + " — found via JAVA_HOME: " + java_home,
+			"1. Press Fix — points Editor Settings at JAVA_HOME\n2. Refresh preflight.",
+			true)
+		row["fix_value"] = java_home
+		return row
+	var jbr := android_studio_jbr_path()
+	if DirAccess.dir_exists_absolute(jbr):
+		var row := _row("android.jdk", "Java SDK",
+			"warn", _toolchain_path_detail(jdk_path) + " — found Android Studio's bundled JDK: " + jbr,
+			"1. Press Fix — points Editor Settings at Android Studio's bundled JDK\n2. Refresh preflight.",
+			true)
+		row["fix_value"] = jbr
+		return row
+	return _row("android.jdk", "Java SDK", "fail", _toolchain_path_detail(jdk_path),
+		"A valid Java SDK path is required in Editor Settings.\n1. Install a JDK (Android Studio bundles one, or install one standalone)\n2. Editor → Editor Settings → Export → Android → Java SDK Path\n3. Refresh preflight.",
+		false, [{"label": "Android Studio", "url": "https://developer.android.com/studio"}])
+
+
+## Shared "not configured" vs "configured but wrong" detail text for
+## Android's toolchain-path checks.
+static func _toolchain_path_detail(configured_path: String) -> String:
+	return "not configured" if configured_path == "" else "configured path missing (%s)" % configured_path
+
+
+## Picks windows, linux, or macos by os_name — anything other than
+## "Windows"/"Linux" falls back to macos.
+static func pick_by_os(os_name: String, windows: String, linux: String, macos: String) -> String:
+	match os_name:
+		"Windows":
+			return windows
+		"Linux":
+			return linux
+		_:
+			return macos
+
+
+## Where the Android SDK conventionally lives after an Android Studio
+## install — the "is it here even though nobody told us" fallback the Fix
+## checks before writing anything.
+static func android_sdk_conventional_path() -> String:
+	return pick_by_os(OS.get_name(),
+		OS.get_environment("LOCALAPPDATA").path_join("Android/Sdk"),
+		OS.get_environment("HOME").path_join("Android/Sdk"),
+		OS.get_environment("HOME").path_join("Library/Android/sdk"))
+
+
+## Android Studio's own bundled JDK (JBR), checked only when JAVA_HOME
+## isn't set. Less reliable than a plain SDK path guess: Android Studio's
+## own install location varies more, especially per-user Windows/Linux installs.
+static func android_studio_jbr_path() -> String:
+	return pick_by_os(OS.get_name(),
+		"C:/Program Files/Android/Android Studio/jbr",
+		"/opt/android-studio/jbr",
+		"/Applications/Android Studio.app/Contents/jbr/Contents/Home")
+
+
+## adb isn't guaranteed on PATH (confirmed absent on a default macOS
+## install) — prefers the SDK's own platform-tools, falling back to a bare
+## command name.
+static func resolve_adb_path(sdk_path: String) -> String:
+	var exe_name := "adb.exe" if OS.get_name() == "Windows" else "adb"
+	if sdk_path != "":
+		var candidate := sdk_path.path_join("platform-tools").path_join(exe_name)
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return exe_name
+
+
+## Parses `adb devices -l` into [{serial, state, model}, ...] for a future
+## device picker. `state` lets callers tell "unauthorized"/"offline" apart
+## from a ready ("device") one.
+static func parse_adb_devices(output: String) -> Array:
+	var devices: Array = []
+	var seen_header := false
+	for line in output.split("\n"):
+		var s := line.strip_edges()
+		if not seen_header:
+			# skip everything until adb's device-list header — a cold server
+			# prints "* daemon … *" startup lines (on stderr, captured via 2>&1)
+			# before it
+			if s.begins_with("List of devices"):
+				seen_header = true
+			continue
+		if s.is_empty():
+			continue
+		var tokens := s.split(" ", false)
+		if tokens.size() < 2:
+			continue
+		var model := ""
+		for token in tokens:
+			if token.begins_with("model:"):
+				model = token.trim_prefix("model:")
+		devices.append({"serial": tokens[0], "state": tokens[1], "model": model})
+	return devices
+
+
+## One adb query returning {code, devices}; the dock feeds both the picker and
+## the Device row from it, so adb runs once per refresh instead of twice.
+func query_adb_devices(sdk_path: String) -> Dictionary:
+	var r: Dictionary = Exec.run(PackedStringArray([resolve_adb_path(sdk_path), "devices", "-l"]))
+	return {"code": int(r["code"]), "devices": parse_adb_devices(str(r["output"]))}
+
+
+## Keep a device pick valid across refreshes: preserve it if still among the
+## ready devices, else fall back to the first ready one (or "" if none) — so a
+## pick that got unplugged can't block a build while a valid device exists.
+func reconcile_device_selection(current: String, ready: Array) -> String:
+	for d in ready:
+		if str(d["serial"]) == current:
+			return current
+	return str(ready[0]["serial"]) if not ready.is_empty() else ""
+
+
+## Android's only build mode this pass IS a device install, so "no ready
+## device" is a hard fail here (iOS's device row is a warn — TestFlight/.ipa
+## export don't need a physical device). Classifies query_adb_devices()'s result.
+func _check_android_devices(code: int, devices: Array) -> Dictionary:
+	if code != 0:
+		return _row("android.devices", "Device", "warn", "adb unavailable",
+			"Needs a working Android SDK first — see the SDK row above.")
+	var ready: Array = devices.filter(func(d): return str(d["state"]) == "device")
+	if devices.is_empty():
+		return _row("android.devices", "Device", "fail", "none",
+			"1. Plug in an Android device with USB debugging enabled (Settings → Developer options), or start an emulator\n2. Refresh preflight.")
+	if ready.is_empty():
+		return _row("android.devices", "Device", "fail", "%d connected, none authorized" % devices.size(),
+			"A device is connected but hasn't accepted the debugging prompt yet.\n1. On the device, accept the \"Allow USB debugging\" RSA fingerprint prompt\n2. Refresh preflight.")
+	return _row("android.devices", "Device", "ok", "%d available" % ready.size())
+
+
+## Verified against engine source (not inferred): OS.get_data_dir()/godot/
+## keystores/debug.keystore, lowercase "godot".
+static func default_debug_keystore_path() -> String:
+	return OS.get_data_dir().path_join("godot/keystores/debug.keystore")
+
+
+## No Fix — Godot manages this file itself. Treats path/user/pass as one
+## all-or-nothing group, per Godot's error text (exact validation rule
+## unconfirmed). A preset-level override or GODOT_ANDROID_KEYSTORE_DEBUG_*
+## env vars could make the keystore Godot actually uses diverge from what
+## this row reports.
+func _check_android_debug_keystore(keystore_path: String, keystore_user: String, keystore_pass: String) -> Dictionary:
+	var configured := int(keystore_path != "") + int(keystore_user != "") + int(keystore_pass != "")
+	if configured != 0 and configured != 3:
+		return _row("android.debug_keystore", "Debug keystore", "fail", "inconsistent config",
+			"Either Debug Keystore, Debug User AND Debug Password settings must be configured OR none of them.")
+	if configured == 3:
+		if FileAccess.file_exists(keystore_path):
+			return _row("android.debug_keystore", "Debug keystore", "ok", keystore_path)
+		return _row("android.debug_keystore", "Debug keystore", "fail", _toolchain_path_detail(keystore_path),
+			"1. Fix the path under Editor → Editor Settings → Export → Android → Debug Keystore, or clear all three debug keystore fields to let Godot manage its own default\n2. Refresh preflight.")
+	var default_path := default_debug_keystore_path()
+	if FileAccess.file_exists(default_path):
+		return _row("android.debug_keystore", "Debug keystore", "ok", "Godot-managed default: " + default_path)
+	return _row("android.debug_keystore", "Debug keystore", "warn", "not yet generated",
+		"Godot creates this automatically on first export, using the JDK configured above. Nothing to do here yet — Refresh after your first export to confirm it was created.")
+
+
+## Confirms an Android export preset exists, has its required base config
+## keys, and has an export_path Godot can actually write an APK to.
+func _check_android_preset() -> Dictionary:
+	var preset := load_preset("Android")
+	if preset.is_empty():
+		return _row("android.preset", "Android export preset", "fail", "",
+			"No Android export preset found. Create one in Project → Export (platform Android).")
+	var problems := PackedStringArray()
+	var export_path := str(preset["export_path"])
+	if export_path == "":
+		problems.append("no export path")
+	elif not is_apk_export_path(export_path):
+		problems.append("export path must end in .apk")
+	var missing := _missing_base_keys(preset["section"])
+	if not missing.is_empty():
+		problems.append("%d missing base keys" % missing.size())
+	var detail := "%s → %s" % [preset["name"], preset["export_path"]]
+	if problems.is_empty():
+		return _row("android.preset", "Android export preset", "ok", detail)
+	return _row("android.preset", "Android export preset", "warn",
+		detail + " (" + ", ".join(problems) + ")",
+		"1. Press Fix — sets a default export path (and backfills missing base keys)\n2. Refresh preflight.", true)
+
+
+## Backfills a missing/invalid export_path and missing base preset keys.
+## Only writes export_presets.cfg — no Editor Settings involved.
+func _fix_android_preset() -> Dictionary:
+	var preset := load_preset("Android")
+	if preset.is_empty():
+		return err("No Android preset to fix — create one first.")
+	var cfg := ConfigFile.new()
+	if cfg.load("res://export_presets.cfg") != OK:
+		return err("Cannot parse export_presets.cfg.")
+	var msgs := PackedStringArray()
+	var export_path := str(preset["export_path"])
+	if not is_apk_export_path(export_path):
+		var default_path := "build/android/%s.apk" % clean_app_name()
+		cfg.set_value(str(preset["section"]), "export_path", default_path)
+		msgs.append("export_path=" + default_path)
+	var defaults := preset_base_defaults()
+	var healed := 0
+	for key in defaults:
+		if not cfg.has_section_key(str(preset["section"]), key):
+			cfg.set_value(str(preset["section"]), key, defaults[key])
+			healed += 1
+	if healed > 0:
+		msgs.append("backfilled %d base keys" % healed)
+	if cfg.save("res://export_presets.cfg") != OK:
+		return err("Cannot write export_presets.cfg.")
+	mark_dirty()
+	refresh_preflight()
+	return ok({"message": ", ".join(msgs) if not msgs.is_empty() else "nothing to fix"})
 
 
 func _spawn_asc(command: String, bundle_id: String, log_name: String) -> Dictionary:
@@ -888,31 +1255,31 @@ func _poll_asc() -> void:
 		if Time.get_ticks_msec() - _asc_started_ms > 60000:
 			Exec.kill_tree(int(_asc_proc["pid"]))
 			_asc_proc = {}
-			var row_id := "asc_key" if _asc_phase == "team" else "app_record"
+			var row_id := "ios.asc_key" if _asc_phase == "team" else "ios.app_record"
 			_set_row(row_id, "warn", "check timed out", "Network problem reaching the App Store Connect API — Refresh to retry.")
 		return
 	var result := _parse_helper_json(Exec.read_all(_asc_proc["log"]))
 	_asc_proc = {}
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	var bundle := str(preset.get("bundle_id", ""))
 	if _asc_phase == "team":
 		_handle_team_info(result, preset)
 		return
 	if not result.get("ok", false):
-		_set_row("app_record", "warn", "check failed", "ASC API error: %s" % result.get("error", "unknown"))
+		_set_row("ios.app_record", "warn", "check failed", "ASC API error: %s" % result.get("error", "unknown"))
 	elif result.get("found", false):
 		var apps: Array = result.get("apps", [])
 		var name := str(apps[0].get("name", "")) if not apps.is_empty() else ""
-		_set_row("app_record", "ok", name)
+		_set_row("ios.app_record", "ok", name)
 	elif not result.get("bundle_registered", true):
 		# Nothing has registered the App ID yet (signing does it, but only once
 		# a first build has run) — the New App dialog's dropdown would be empty.
-		_set_row("app_record", "fail", "bundle id not registered",
+		_set_row("ios.app_record", "fail", "bundle id not registered",
 			"1. Press Fix — registers %s on the team through the API key\n2. Then: My Apps → ＋ → New App → pick it from the Bundle ID dropdown." % bundle,
 			[{"label": "Register manually", "url": "https://developer.apple.com/account/resources/identifiers/add/bundleId"}],
 			true)
 	else:
-		_set_row("app_record", "fail", "missing for " + bundle,
+		_set_row("ios.app_record", "fail", "missing for " + bundle,
 			"One-time manual step (app creation is not in Apple's public API, ~2 min):\n1. My Apps → ＋ → New App\n2. Platform iOS; Name: unique across the App Store\n3. Bundle ID: pick %s from the dropdown\n4. SKU: any internal id. Then Refresh." % bundle,
 			[{"label": "Open My Apps", "url": "https://appstoreconnect.apple.com/apps"}])
 
@@ -927,32 +1294,32 @@ func _handle_team_info(result: Dictionary, preset: Dictionary) -> void:
 	if not result.get("ok", false):
 		var error := str(result.get("error", "unknown"))
 		if error.contains("401") or error.contains("NOT_AUTHORIZED"):
-			_set_row("asc_key", "fail", "key %s rejected" % c["key_id"],
+			_set_row("ios.asc_key", "fail", "key %s rejected" % c["key_id"],
 				"1. ↗ Create API key — the stored key is invalid or revoked; make a new one (role: App Manager)\n2. Drop the new .p8 on this panel\n3. Paste its Issuer ID and Save.", key_links)
 		else:
-			_set_row("asc_key", "warn", "validation failed", "ASC API error: %s" % error)
-		_set_row("app_record", "warn", "skipped (key not validated)")
+			_set_row("ios.asc_key", "warn", "validation failed", "ASC API error: %s" % error)
+		_set_row("ios.app_record", "warn", "skipped (key not validated)")
 		return
 	var got := str(result.get("team_id", ""))
 	if expected != "" and got != "" and got != expected:
-		_set_row("asc_key", "fail",
+		_set_row("ios.asc_key", "fail",
 			"wrong team — key %s → %s" % [c["key_id"], _team_label(got)],
 			"This project targets %s, but the key belongs to %s.\n1. ↗ Create API key — first switch the team picker (top right of that page) to %s\n2. ＋ → any name, role: App Manager → Generate → Download\n3. Drop the new .p8 on this panel, paste that page's Issuer ID, Save." % [
 				_team_label(expected), _team_label(got), _team_label(expected)],
 			key_links)
-		_set_row("app_record", "warn", "blocked — wrong-team API key (fix the row above)")
+		_set_row("ios.app_record", "warn", "blocked — wrong-team API key (fix the row above)")
 		return
 	var detail := "key %s (team unverified — no assets on the team yet)" % c["key_id"]
 	if got != "":
 		detail = "key %s (team %s)" % [c["key_id"], _team_label(got)]
-	_set_row("asc_key", "ok", detail)
+	_set_row("ios.asc_key", "ok", detail)
 	if preset.is_empty():
-		_set_row("app_record", "warn", "needs a preset first")
+		_set_row("ios.app_record", "warn", "needs a preset first")
 		return
 	_asc_phase = "app"
 	_asc_proc = _spawn_asc("check-app", str(preset["bundle_id"]), "asc_check_app.log")
 	_asc_started_ms = Time.get_ticks_msec()
-	_set_row("app_record", "busy", "checking…")
+	_set_row("ios.app_record", "busy", "checking…")
 
 
 func _set_row(id: String, status: String, detail: String, guidance := "", links: Array = [], fixable := false) -> void:
@@ -1000,7 +1367,7 @@ func create_ios_preset(bundle_id: String, team_id := "", path := "res://export_p
 	bundle_id = bundle_id.strip_edges()
 	if not valid_bundle_id(bundle_id):
 		return err("Bundle id must be reverse-DNS, e.g. com.studio.game.")
-	if path == "res://export_presets.cfg" and not load_ios_preset().is_empty():
+	if path == "res://export_presets.cfg" and not load_preset("iOS").is_empty():
 		return err("An iOS preset already exists.")
 	var cfg := ConfigFile.new()
 	if FileAccess.file_exists(path):
@@ -1113,14 +1480,16 @@ func set_asc_issuer(issuer: String) -> Dictionary:
 ## team is available — with several, choosing is the user's call).
 func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 	match id:
-		"preset":
+		"ios.preset":
 			return _fix_preset(str(opts.get("team_id", "")))
-		"templates":
-			return _fix_templates()
+		"ios.templates", "android.templates":
+			return _fix_templates(id)
 		"etc2":
 			return _fix_etc2()
-		"app_record":
+		"ios.app_record":
 			return _fix_bundle_id()
+		"android.preset":
+			return _fix_android_preset()
 	return err("No fix for '%s'." % id)
 
 
@@ -1132,7 +1501,7 @@ func _fix_bundle_id() -> Dictionary:
 		return err("A fix is already running.")
 	if not has_asc_key():
 		return err("Needs an ASC API key (see the row above).")
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	if preset.is_empty():
 		return err("No iOS preset.")
 	var handle := _spawn_asc("ensure-bundle-id", preset["bundle_id"], "asc_bundle_id.log")
@@ -1140,15 +1509,18 @@ func _fix_bundle_id() -> Dictionary:
 		return err(str(handle.get("error", "spawn failed")))
 	handle["label"] = "bundle-id registration"
 	_fix_proc = handle
-	_set_row("app_record", "busy", "registering %s…" % preset["bundle_id"])
-	log_line.emit("\n── bundle-id registration ──\n")
+	_set_row("ios.app_record", "busy", "registering %s…" % preset["bundle_id"])
+	log_line.emit("\n── bundle-id registration ──\n", "ios")
 	return ok({"message": "Registering the bundle id via the API key…"})
 
 
 ## Download the official export-template pack for the running Godot version and
 ## install it where the editor expects it — the same result as Manage Export
-## Templates → Download and Install, without the dialog.
-func _fix_templates() -> Dictionary:
+## Templates → Download and Install, without the dialog. `row_id` is whichever
+## of ios.templates/android.templates triggered the Fix, so the busy indicator
+## and log lines tag the right platform. Uses HTTPRequest + ZIPReader — no
+## shell, so no OS branch needed.
+func _fix_templates(row_id: String) -> Dictionary:
 	if not _fix_proc.is_empty():
 		return err("A fix is already running.")
 	var v: Dictionary = Engine.get_version_info()
@@ -1158,38 +1530,89 @@ func _fix_templates() -> Dictionary:
 	var dest := templates_dir()
 	var cache := OS.get_cache_dir().path_join("build_kit")
 	var tpz := cache.path_join("templates.tpz")
-	var extract := cache.path_join("tpz_extract")
-	var shell := "curl -fL -sS -o %s %s && rm -rf %s && unzip -q %s -d %s && mkdir -p %s && ditto %s %s && rm -rf %s %s" % [
-		Exec.quote(tpz), Exec.quote(url),
-		Exec.quote(extract),
-		Exec.quote(tpz), Exec.quote(extract),
-		Exec.quote(dest),
-		Exec.quote(extract.path_join("templates")), Exec.quote(dest),
-		Exec.quote(extract), Exec.quote(tpz)]
-	var handle := Exec.spawn_shell(shell, cache.path_join("templates_install.log"))
-	if not handle.get("ok", false):
-		return err(str(handle.get("error", "spawn failed")))
-	handle["label"] = "templates install"
-	_fix_proc = handle
-	_set_row("templates", "busy", "downloading + installing (~1 GB, several minutes)…")
-	log_line.emit("\n── templates install ──\n%s\n→ %s\n" % [url, dest])
+	DirAccess.make_dir_recursive_absolute(cache)
+	var platform := row_id.get_slice(".", 0)
+	var http := HTTPRequest.new()
+	http.download_file = tpz
+	add_child(http)
+	http.request_completed.connect(_on_templates_downloaded.bind(row_id, platform, dest, tpz, http))
+	var request_err := http.request(url)
+	if request_err != OK:
+		http.queue_free()
+		return err("Couldn't start the download (err %d)." % request_err)
+	_fix_proc = {"label": "templates install", "platform": platform}
+	_set_row(row_id, "busy", "downloading + installing (~1 GB, several minutes)…")
+	log_line.emit("\n── templates install ──\n%s\n→ %s\n" % [url, dest], platform)
 	return ok({"message": "Downloading export templates — the row updates when done."})
 
 
-func _poll_fix() -> void:
-	if _fix_proc.is_empty():
+## "" for anything not under the templates/ prefix (including the bare
+## directory-marker entry itself) — the filter half of the extraction, kept
+## pure so the verifier can exercise it without a real zip or network.
+static func _templates_zip_target(entry: String, dest: String) -> String:
+	if not entry.begins_with("templates/") or entry == "templates/":
+		return ""
+	return dest.path_join(entry.trim_prefix("templates/"))
+
+
+func _on_templates_downloaded(result: int, response_code: int, _headers: PackedStringArray,
+		_body: PackedByteArray, row_id: String, platform: String, dest: String, tpz: String, http: HTTPRequest) -> void:
+	http.queue_free()
+	_fix_proc = {}
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		log_line.emit("templates install FAILED (result %d, HTTP %d) — see above.\n" % [result, response_code], platform)
+		refresh_preflight()
 		return
+	var reader := ZIPReader.new()
+	if reader.open(tpz) != OK:
+		log_line.emit("templates install FAILED — could not open downloaded archive.\n", platform)
+		refresh_preflight()
+		return
+	var extract := _extract_templates(reader, dest)
+	reader.close()
+	if not extract["ok"]:
+		log_line.emit("templates install FAILED — %s\n" % extract["error"], platform)
+		refresh_preflight()
+		return
+	DirAccess.remove_absolute(tpz)
+	log_line.emit("templates install finished.\n", platform)
+	refresh_preflight()
+
+
+## Extracts the archive's templates/ subtree into dest; aborts on the first
+## write failure with {ok:false, error}.
+func _extract_templates(reader: ZIPReader, dest: String) -> Dictionary:
+	for entry in reader.get_files():
+		var target := _templates_zip_target(entry, dest)
+		if target == "":
+			continue
+		DirAccess.make_dir_recursive_absolute(target.get_base_dir())
+		var f := FileAccess.open(target, FileAccess.WRITE)
+		if f == null:
+			return {"ok": false, "error": "couldn't write %s (err %d)" % [target, FileAccess.get_open_error()]}
+		f.store_buffer(reader.read_file(entry))
+		var werr := f.get_error()
+		f.close()
+		if werr != OK:
+			return {"ok": false, "error": "couldn't write %s (err %d)" % [target, werr]}
+	return {"ok": true, "error": ""}
+
+
+func _poll_fix() -> void:
+	if _fix_proc.is_empty() or not _fix_proc.has("exit_path"):
+		return
+	var platform := str(_fix_proc.get("platform", "ios"))
 	var tail: Dictionary = Exec.read_from(_fix_proc["log"], int(_fix_proc.get("offset", 0)))
 	if str(tail["text"]) != "":
 		_fix_proc["offset"] = tail["offset"]
-		log_line.emit(str(tail["text"]))
+		log_line.emit(str(tail["text"]), platform)
 	var code := Exec.exit_code(_fix_proc["exit_path"])
 	if code < 0:
 		return
 	var label := str(_fix_proc.get("label", "fix"))
 	_fix_proc = {}
 	log_line.emit("%s finished.\n" % label if code == 0
-		else "%s FAILED (exit %d) — see above.\n" % [label, code])
+		else "%s FAILED (exit %d) — see above.\n" % [label, code], platform)
 	refresh_preflight()
 
 
@@ -1226,7 +1649,7 @@ func _missing_base_keys(section: String) -> PackedStringArray:
 
 
 func _fix_preset(team_id := "") -> Dictionary:
-	var preset := load_ios_preset()
+	var preset := load_preset("iOS")
 	if preset.is_empty():
 		return err("No iOS preset to fix — create one with the form below first.")
 	var cfg := ConfigFile.new()
