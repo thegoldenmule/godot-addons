@@ -138,4 +138,4 @@ tools/snapser/clear_board_rows.sh --snapend <id> --board career_wins --all-rows 
 
 ## Test and tool runs stay offline
 
-The kit treats any run whose scene or script, or the main scene, is under `res://tests/` or `res://tools/` as offline, unless `SNAPSER_TESTS_ONLINE=1` is set. A committed gateway therefore never puts headless suites online (DoD 7).
+The kit treats any run whose scene or script, or the main scene, is under `res://tests/` or `res://tools/` as offline, unless `SNAPSER_TESTS_ONLINE=1` is set. A committed gateway therefore never puts headless suites online (DoD 7). Offline and test runs also write nothing under `user://`, so suites leave no kit files behind.

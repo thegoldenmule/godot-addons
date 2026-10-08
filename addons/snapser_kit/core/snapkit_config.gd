@@ -12,7 +12,8 @@ extends RefCounted
 ##     "gateway_url": "https://gateway.snapser.com/<snapend-id>",
 ##     "anon_handle_prefix": "mygame-",
 ##     "leaderboards": { "career_wins": "career_wins" },
-##     "cloud_save": { "blob_key": "save_v1", "sync_prefixes": ["sax_prog_"] },
+##     "cloud_save": { "blob_key": "save_v1", "sync_prefixes": ["sax_prog_"],
+##                     "sync_keys": ["legacy_unlocked_flag"] },
 ##     "link_providers": ["apple", "google"]
 ##   }
 ##
@@ -230,7 +231,7 @@ func declaration_problems(manifest: Dictionary) -> PackedStringArray:
 		var board := leaderboard_id(str(logical))
 		if not (on_server["boards"] as PackedStringArray).has(board):
 			out.append("leaderboards['%s'] -> '%s' is not a board on the snapend manifest" % [logical, board])
-	if not cloud_save_prefixes().is_empty() and not (on_server["blobs"] as PackedStringArray).has(cloud_save_blob_key()):
+	if cloud_save_enabled() and not (on_server["blobs"] as PackedStringArray).has(cloud_save_blob_key()):
 		out.append("cloud_save blob '%s' is not a storage key on the snapend manifest" % cloud_save_blob_key())
 	return out
 
@@ -291,13 +292,28 @@ func cloud_save_blob_key() -> String:
 	return k if k != "" else "save_v1"
 
 
-## cloud_save.sync_prefixes as a PackedStringArray (empty = cloud save disabled).
+## cloud_save.sync_prefixes as a PackedStringArray.
 func cloud_save_prefixes() -> PackedStringArray:
 	var out := PackedStringArray()
 	for p in SnapKitJson.get_array(cloud_save, "sync_prefixes"):
 		if p is String and p != "":
 			out.append(p)
 	return out
+
+
+## cloud_save.sync_keys: exact key names synced alongside the prefixes (for
+## legacy keys that share no prefix).
+func cloud_save_keys() -> PackedStringArray:
+	var out := PackedStringArray()
+	for k in SnapKitJson.get_array(cloud_save, "sync_keys"):
+		if k is String and k != "" and not out.has(k):
+			out.append(k)
+	return out
+
+
+## True when cloud save has anything to sync (prefixes or exact keys).
+func cloud_save_enabled() -> bool:
+	return not cloud_save_prefixes().is_empty() or not cloud_save_keys().is_empty()
 
 
 ## True when the committed file has a truthy optional "quests" section; gates the

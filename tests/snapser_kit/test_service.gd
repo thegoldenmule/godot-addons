@@ -333,3 +333,69 @@ func test_cloud_save_applied_is_re_emitted() -> void:
 	svc.cloud_save_applied.connect(func(keys: PackedStringArray) -> void: got.append(keys))
 	svc.cloud_save.applied.emit(PackedStringArray(["p_a", "p_b"]))
 	check_eq(got, [PackedStringArray(["p_a", "p_b"])], "re-emitted")
+
+
+## path -> [size, modified time] for every file under user:// (recursive).
+func _user_files(dir := "user://") -> Dictionary:
+	var out := {}
+	var d := DirAccess.open(dir)
+	if d == null:
+		return out
+	for f in d.get_files():
+		var p := dir.path_join(f)
+		out[p] = [FileAccess.get_file_as_bytes(p).size(), FileAccess.get_modified_time(p)]
+	for sub in d.get_directories():
+		out.merge(_user_files(dir.path_join(sub)))
+	return out
+
+
+class MemStore extends RefCounted:
+	signal changed(key: String)
+	var data := {}
+	func keys_with_prefix(p: String) -> PackedStringArray:
+		return PackedStringArray(data.keys().filter(func(k: String) -> bool: return k.begins_with(p)))
+	func export_prefix(p: String) -> Dictionary:
+		var o := {}
+		for k in data:
+			if str(k).begins_with(p):
+				o[k] = data[k]
+		return o
+	func import_prefix(_p: String, d: Dictionary, _replace: bool = false) -> int:
+		data.merge(d, true)
+		return d.size()
+	func set_value(k: String, v: Variant) -> void:
+		data[k] = v
+		changed.emit(k)
+
+
+func test_offline_and_test_runs_write_nothing_under_user() -> void:
+	var cfg_dict := {"game_id": "nowrite", "gateway_url": "https://gateway.example.test/x",
+		"cloud_save": {"blob_key": "save_v1", "sync_prefixes": ["prog_"], "sync_keys": ["legacy"]},
+		"declared": {"events": ["session_start", "session_end", "online_state", "run_end"]}}
+	var configs := [
+		SnapKitConfig.from_dict({"game_id": "nowrite", "cloud_save": cfg_dict.cloud_save}),  # no gateway
+		SnapKitConfig.resolve(cfg_dict, {}, PackedStringArray(["res://tests/Any.tscn"]), {}, true),  # test run
+		SnapKitConfig.resolve(cfg_dict, {"SNAPSER_OFFLINE": "1"}, PackedStringArray(), {}, true),
+		SnapKitConfig.from_dict(cfg_dict).force_offline("capture"),
+	]
+	await tree.process_frame
+	var before := _user_files()
+	for cfg in configs:
+		check(cfg.is_offline(), "offline: " + cfg.describe())
+		var svc := SnapKitService.new()   # DEFAULT session / state paths on purpose
+		var store := MemStore.new()
+		svc.save_store = store
+		add_node(svc)
+		svc.start_with_config(cfg)
+		await svc.wait_until_ready()
+		store.set_value("prog_level", 3)
+		store.set_value("legacy", true)
+		svc.track("run_end", {"mode": "m"})
+		await svc.record_stat("x", 1)
+		await svc.cloud_save_push()
+		await svc.cloud_save_pull()
+		await svc.analytics_client.flush()
+		svc.notification(Node.NOTIFICATION_APPLICATION_PAUSED)
+		svc.notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+		await tree.process_frame
+	check_eq(_user_files(), before, "no file created or modified under user://")

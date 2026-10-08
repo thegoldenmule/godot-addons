@@ -405,3 +405,82 @@ func test_changed_keys() -> void:
 		PackedStringArray(["b", "c", "d"]), "changed, removed, added")
 	check_eq(SnapKitCloudSave.changed_keys({"a": 1}, {"a": 1.0}), PackedStringArray(["a"]), "type change counts")
 	check_eq(SnapKitCloudSave.changed_keys({"c": 3}, {}, false), PackedStringArray(), "removals optional")
+
+
+# ---- v0.2: exact sync_keys, no offline writes ------------------------------------
+
+func _keyed_device(store: Object) -> SnapKitCloudSave:
+	var cs := _device(store)
+	var cfg := FakeConfig.new()
+	cfg.keys = PackedStringArray(["legacy_flag"])
+	cs.setup(cs.get("_storage"), store, cfg)
+	return cs
+
+
+func test_sync_keys_exact_names() -> void:
+	var store := FakeSaveStore.new()
+	store.set_value("prog_a", 1)
+	store.set_value("legacy_flag", false)
+	store.set_value("legacy_flag_extra", "local only")
+	var cs := _keyed_device(store)
+	check_eq(cs.export_local(), {"prog_a": 1, "legacy_flag": false}, "exact key synced, sibling not")
+	check(cs.is_synced_key("legacy_flag") and not cs.is_synced_key("legacy_flag_extra"), "is_synced_key")
+	server.put_raw("user-1", "save_v1",
+		SnapKitCloudSave.make_envelope({"prog_a": 1, "legacy_flag": true}, 2, "other", 100))
+	var r: Dictionary = await cs.pull()
+	check(r.ok, "pull ok")
+	check_eq(store.get_value("legacy_flag"), true, "exact key imported (bool OR)")
+	check_eq(store.get_value("legacy_flag_extra"), "local only", "sibling sharing the text untouched")
+	check_eq(_remote().get("legacy_flag"), true, "exact key pushed")
+
+
+func test_sync_keys_never_deleted_by_pull() -> void:
+	server.put_raw("user-1", "save_v1", SnapKitCloudSave.make_envelope({"prog_a": 2}, 2, "other", 100))
+	var store := FakeSaveStore.new()
+	store.set_value("legacy_flag", true)
+	var cs := _keyed_device(store)
+	await cs.pull()
+	check_eq(store.get_value("legacy_flag"), true, "absent remotely -> kept locally")
+
+
+func test_sync_key_change_marks_dirty() -> void:
+	var store := FakeSaveStore.new()
+	var cs := _keyed_device(store)
+	store.set_value("legacy_flag_extra", 1)
+	check(not cs.is_dirty(), "unsynced key ignored")
+	store.set_value("legacy_flag", true)
+	check(cs.is_dirty(), "exact key marks dirty")
+
+
+func test_offline_writes_no_state_file() -> void:
+	var store := FakeSaveStore.new()
+	var cs := _device(store)
+	var cfg := FakeConfig.new()
+	cfg.pretend_offline = true
+	cs.state_path = "%s/offline_state.json" % STATE_DIR
+	cs.setup(cs.get("_storage"), store, cfg)
+	store.set_value("prog_a", 1)          # mark_dirty
+	check(cs.device_id() != "", "device id still available (in memory)")
+	check(not FileAccess.file_exists(cs.state_path), "no state file while offline")
+
+
+func test_unpersisted_offline_change_counts_as_recent() -> void:
+	# Synced once online, then the game ran offline (no state written) and
+	# changed a scalar; another device wrote later. On the next online pull the
+	# local change has no recorded time: it must count as recent, not lose.
+	var store := FakeSaveStore.new()
+	store.set_value("prog_name", "old")
+	var cs := _device(store)
+	await cs.pull()                               # first sync: uploads "old"
+	var st: Dictionary = cs.get("_state")
+	st["local_changed_at"] = 0                    # as if the change happened offline
+	cs.set("_importing", true)
+	store.set_value("prog_name", "offline edit")  # store change not seen as a mark
+	cs.set("_importing", false)
+	server.put_raw("user-1", "save_v1", SnapKitCloudSave.make_envelope(
+		{"prog_name": "other device"}, 9, "other", int(st.get("synced_at", 0)) - 5))
+	cs.merge_func = func(l: Dictionary, r: Dictionary) -> Dictionary:
+		return SnapKitCloudSave.default_merge(l, r, cs.last_remote_is_newer)
+	var r: Dictionary = await cs.pull()
+	check(r.ok, "pull ok")
+	check_eq(store.get_value("prog_name"), "offline edit", "unpersisted local change treated as recent")

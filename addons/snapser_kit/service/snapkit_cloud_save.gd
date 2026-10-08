@@ -13,8 +13,16 @@ extends Node
 ## export_prefix / import_prefix are required (is_enabled() checks has_method);
 ## without the `changed` signal, cloud save still works but only pushes when
 ## asked (push(), pause / focus-out) — there is no debounce trigger.
-## Only keys under SnapKitConfig.cloud_save_prefixes() are synced (e.g.
-## "sax_prog_"); everything else (settings) stays local.
+## Only keys under SnapKitConfig.cloud_save_prefixes() (e.g. "sax_prog_") plus
+## the exact names in cloud_save_keys() ("sync_keys", for legacy keys with no
+## shared prefix) are synced; everything else (settings) stays local. Exact
+## keys are imported one by one WITHOUT `replace`, so they never remove sibling
+## keys that merely start with the same text; a pull adds/overwrites them but
+## never deletes them.
+##
+## No files in offline / test runs: the state file (state_path) is written only
+## while the config is online. Offline, the bookkeeping lives in memory; the
+## first online pull treats unsynced local changes of unknown age as recent.
 ##
 ## Blob (key = SnapKitConfig.cloud_save_blob_key(), default "save_v1", access
 ## private):
@@ -128,14 +136,30 @@ func setup(storage: SnapKitStorage, store: Object, config: SnapKitConfig) -> voi
 
 
 ## True when storage and a store with export_prefix/import_prefix are wired and
-## the config lists at least one sync prefix.
+## the config lists at least one sync prefix or exact sync key.
 func is_enabled() -> bool:
 	return _storage != null and _store != null and _store.has_method("export_prefix") \
-		and _store.has_method("import_prefix") and not sync_prefixes().is_empty()
+		and _store.has_method("import_prefix") \
+		and (not sync_prefixes().is_empty() or not sync_keys().is_empty())
 
 
 func sync_prefixes() -> PackedStringArray:
 	return _config.cloud_save_prefixes() if _config != null else PackedStringArray()
+
+
+## Exact key names synced alongside the prefixes ("sync_keys").
+func sync_keys() -> PackedStringArray:
+	return _config.cloud_save_keys() if _config != null else PackedStringArray()
+
+
+## True when `key` is synced (under a prefix or an exact sync key).
+func is_synced_key(key: String) -> bool:
+	if sync_keys().has(key):
+		return true
+	for p in sync_prefixes():
+		if key.begins_with(p):
+			return true
+	return false
 
 
 func blob_key() -> String:
@@ -207,6 +231,13 @@ func export_local() -> Dictionary:
 		var part: Variant = _store.call("export_prefix", p)
 		if part is Dictionary:
 			out.merge(part, true)
+	for k in sync_keys():
+		if out.has(k):
+			continue
+		# The duck-typed store only exports by prefix: keep the exact key only.
+		var one: Variant = _store.call("export_prefix", k)
+		if one is Dictionary and (one as Dictionary).has(k):
+			out[k] = one[k]
 	return out
 
 
@@ -298,6 +329,11 @@ func _pull_locked(attempt: int) -> Dictionary:
 		return got
 	var local := export_local()
 	var local_hash := data_hash(local)
+	if bool(_state.get("has_synced", false)) and local_hash != str(_state.get("synced_hash", "")) \
+			and int(_state.get("local_changed_at", 0)) <= int(_state.get("synced_at", 0)):
+		# Local changed since the last sync but its time was not persisted (an
+		# offline run writes no state file): treat the change as just made.
+		_state["local_changed_at"] = int(Time.get_unix_time_from_system())
 	var has_synced := bool(_state.get("has_synced", false))
 	var local_changed := (local_hash != str(_state.get("synced_hash", ""))) if has_synced else not local.is_empty()
 
@@ -377,8 +413,16 @@ func _import_local(data: Dictionary) -> void:
 			_store.call("import_prefix", p, part, true)
 		else:
 			_store.call("import_prefix", p, part)
+	for k in sync_keys():
+		if not data.has(k) or _under_prefix(k):
+			continue
+		# Exact keys: never `replace` (it would drop siblings sharing the text).
+		if can_replace:
+			_store.call("import_prefix", k, {k: data[k]}, false)
+		else:
+			_store.call("import_prefix", k, {k: data[k]})
 	_importing = false
-	var keys := changed_keys(before, data, can_replace)
+	var keys := changed_keys(before, export_local())
 	if not keys.is_empty():
 		applied.emit(keys)
 
@@ -418,13 +462,18 @@ func _record_sync(cas: String, content_hash: String, version: int) -> void:
 	_save_state()
 
 
+func _under_prefix(key: String) -> bool:
+	for p in sync_prefixes():
+		if key.begins_with(p):
+			return true
+	return false
+
+
 func _on_store_changed(key: String) -> void:
 	if _importing:
 		return
-	for p in sync_prefixes():
-		if key.begins_with(p):
-			mark_dirty()
-			return
+	if is_synced_key(key):
+		mark_dirty()
 
 
 func _on_debounce() -> void:
@@ -470,6 +519,9 @@ func _load_state() -> void:
 
 
 func _save_state() -> void:
+	# Offline / test runs write nothing under user:// (kept in memory instead).
+	if _config == null or _config.is_offline():
+		return
 	var f := FileAccess.open(state_path, FileAccess.WRITE)
 	if f == null:
 		return

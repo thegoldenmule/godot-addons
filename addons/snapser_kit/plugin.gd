@@ -44,7 +44,7 @@ func _on_show_config() -> void:
 	print("[SnapKit] %s" % cfg.describe())
 	print("[SnapKit]   game_id=%s  handle_prefix=%s" % [cfg.game_id, cfg.handle_prefix()])
 	print("[SnapKit]   leaderboards=%s" % JSON.stringify(cfg.leaderboards))
-	print("[SnapKit]   cloud_save: blob_key=%s sync_prefixes=%s" % [cfg.cloud_save_blob_key(), cfg.cloud_save_prefixes()])
+	print("[SnapKit]   cloud_save: blob_key=%s sync_prefixes=%s sync_keys=%s" % [cfg.cloud_save_blob_key(), cfg.cloud_save_prefixes(), cfg.cloud_save_keys()])
 	print("[SnapKit]   link_providers=%s  quests=%s" % [cfg.link_providers, cfg.quests_enabled()])
 
 

@@ -180,7 +180,7 @@ func start_with_config(cfg: SnapKitConfig) -> void:
 	config = cfg
 	if _pending_offline_reason != "":
 		config.force_offline(_pending_offline_reason)
-	if config.has_declarations("blobs") and not config.cloud_save_prefixes().is_empty() \
+	if config.has_declarations("blobs") and config.cloud_save_enabled() \
 			and not config.is_declared("blobs", config.cloud_save_blob_key()):
 		_warn_undeclared("blobs", config.cloud_save_blob_key())
 
