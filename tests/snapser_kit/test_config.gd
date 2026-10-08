@@ -193,3 +193,62 @@ func test_declaration_problems() -> void:
 	check(text.contains("'best_accuracy' is not a board"), "unmapped board")
 	check(text.contains("blob 'save_v2'"), "blob key")
 	check_eq(probs.size(), 4, "exactly those 4")
+
+
+# ---- v0.2.1: auto-offline fails CLOSED ----------------------------------------
+
+## The theo-asteroids verifier incident: a test run resolved ONLINE because the
+## script was not spelled res://tests/... Reproduced with an absolute --script
+## path; 0.2.0's allow-list of spellings missed it and logged in for real.
+func test_absolute_script_path_is_a_test_run() -> void:
+	var abs_script := ProjectSettings.globalize_path("res://tests/snapser_kit/run_tests.gd")
+	var c := _resolve({}, PackedStringArray(["--script", abs_script]))
+	check(c.is_offline(), "--script <absolute path> -> offline (was online on 0.2.0)")
+	var abs_scene := ProjectSettings.globalize_path("res://tests/Any.tscn")
+	check(SnapKitConfig.is_test_or_tool_run(PackedStringArray([abs_scene])), "absolute scene path inside the project")
+
+
+func test_any_script_run_is_a_tool_run() -> void:
+	for args in [["--script", "res://bake.gd"], ["-s", "bake.gd"], ["-s", "/elsewhere/x.gd"]]:
+		check(_resolve({}, PackedStringArray(args)).is_offline(), "script run offline: %s" % str(args))
+
+
+func test_headless_fails_closed() -> void:
+	var c := _resolve({}, PackedStringArray([SnapKitConfig.ARG_HEADLESS_RUN, "res://scenes/Main.tscn"]))
+	check(c.is_offline(), "headless game-looking run stays offline")
+	check(c.offline_reason.begins_with("headless run"), "reason: " + c.offline_reason)
+	check(_resolve({"SNAPSER_TESTS_ONLINE": "1"}, PackedStringArray([SnapKitConfig.ARG_HEADLESS_RUN])).is_ready(),
+		"SNAPSER_TESTS_ONLINE=1 opts a headless run in")
+	check(_resolve({}, PackedStringArray(["res://scenes/Main.tscn"])).is_ready(), "windowed game run online")
+
+
+func test_from_project_in_this_headless_suite_is_offline() -> void:
+	# This suite runs headless via --script: the real resolver must say offline
+	# even with a committed gateway and without SNAPSER_OFFLINE.
+	var args := OS.get_cmdline_args()
+	args.append(SnapKitConfig.ARG_HEADLESS_RUN)
+	var c := SnapKitConfig.resolve({"gateway_url": "https://g.test/x"}, {}, args, {}, true)
+	check(c.is_offline(), "offline: " + c.offline_reason)
+
+
+func test_offline_paths_config() -> void:
+	var cfg := {"gateway_url": "https://g.test/x", "offline_paths": ["res://scenes/tools", "res://tests/"]}
+	check(SnapKitConfig.resolve(cfg, {}, PackedStringArray(["res://scenes/tools/Bake.tscn"]), {}, true).is_offline(),
+		"custom root")
+	check(SnapKitConfig.resolve(cfg, {}, PackedStringArray(["res://tests/A.tscn"]), {}, true).is_offline(),
+		"trailing slash tolerated")
+	check(SnapKitConfig.resolve(cfg, {}, PackedStringArray(["res://tools/X.tscn"]), {}, true).is_ready(),
+		"replaces the default list (res://tools no longer listed)")
+	check(SnapKitConfig.resolve(cfg, {}, PackedStringArray(["res://scenes/toolsmith/A.tscn"]), {}, true).is_ready(),
+		"prefix match is per path segment")
+	check_eq(SnapKitConfig.from_dict({}).offline_paths, PackedStringArray(["res://tests", "res://tools"]), "default")
+
+
+func test_as_res_path_forms() -> void:
+	check_eq(SnapKitConfig.as_res_path("res://tests/a/../b.gd"), "res://tests/b.gd", "simplified")
+	check_eq(SnapKitConfig.as_res_path("./tools/x.tscn"), "res://tools/x.tscn", "relative")
+	check_eq(SnapKitConfig.as_res_path("--headless"), "", "flag")
+	check_eq(SnapKitConfig.as_res_path("/definitely/outside/project.gd"), "", "outside the project")
+	var id := ResourceLoader.get_resource_uid("res://tests/snapser_kit/run_tests.gd")
+	if id != ResourceUID.INVALID_ID:
+		check_eq(SnapKitConfig.as_res_path(ResourceUID.id_to_text(id)), "res://tests/snapser_kit/run_tests.gd", "uid://")

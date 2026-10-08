@@ -10,7 +10,8 @@
 # Under an isolated HOME, pass --session-file=<abs path> to reuse the same smoke
 # identity (user:// follows HOME, so the default file would be a new user).
 #
-# Env: GODOT (default /Applications/Godot.app/Contents/MacOS/Godot, else `godot` on PATH).
+# Env: GODOT (default /Applications/Godot.app/Contents/MacOS/Godot, else `godot` on PATH),
+#      SMOKE_IMPORT_TIMEOUT_S (240), SMOKE_TIMEOUT_S (300). Exit 124 on timeout.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -44,12 +45,36 @@ if [[ -z "$godot" ]]; then
 fi
 [[ -n "$godot" ]] || { echo "run_smoke: Godot not found; set GODOT" >&2; exit 2; }
 
-# Make sure the class cache exists (fresh clones / worktrees).
-if [[ ! -f "$addons_root/.godot/global_script_class_cache.cfg" ]]; then
-  "$godot" --headless --editor --quit --path "$addons_root" >/dev/null 2>&1 || true
+# Run a command with a deadline; on expiry kill it and fail fast (no hangs).
+# macOS has no `timeout`, so this is a small bash watchdog.
+run_with_deadline() {
+  local secs="$1"; shift
+  "$@" &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= secs )); then
+      kill "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null || true
+      echo "run_smoke: TIMEOUT after ${secs}s: $*" >&2
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
+# Always (re)build the class cache first: a missing OR stale cache makes the
+# smoke script fail to parse, or run against out-of-date class names.
+echo "run_smoke: importing $addons_root (class cache)"
+if ! run_with_deadline "${SMOKE_IMPORT_TIMEOUT_S:-240}" \
+    "$godot" --headless --path "$addons_root" --import >/dev/null 2>&1; then
+  echo "run_smoke: --import failed or timed out; aborting" >&2
+  exit 2
 fi
 
 echo "run_smoke: config=$config"
-# The smoke must actually go online: never inherit a forced-offline flag.
-exec env -u SNAPSER_OFFLINE "$godot" --headless --path "$addons_root" \
+# The smoke must actually go online: never inherit a forced-offline flag. The
+# kit's own test/headless auto-offline rule does not apply: smoke.gd builds its
+# config with SnapKitConfig.from_dict(), from the game's file only.
+run_with_deadline "${SMOKE_TIMEOUT_S:-300}" env -u SNAPSER_OFFLINE "$godot" --headless --path "$addons_root" \
   --script res://tools/snapser/smoke/smoke.gd -- --config="$config" "$@"

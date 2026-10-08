@@ -485,3 +485,71 @@ func test_unpersisted_offline_change_counts_as_recent() -> void:
 	var r: Dictionary = await cs.pull()
 	check(r.ok, "pull ok")
 	check_eq(store.get_value("prog_name"), "offline edit", "unpersisted local change treated as recent")
+
+
+# ---- v0.2.1: monotonic bools on every pull path + merge_policy ---------------------
+
+## Device synced, then ONLY the remote changed (another device / an older build
+## wrote `false`). 0.2.0 took the remote wholesale and re-locked the flag.
+func _synced_then_remote_changes(local: Dictionary, remote_after: Dictionary,
+		policies: Dictionary = {}) -> Array:
+	var store := FakeSaveStore.new()
+	for k in local:
+		store.set_value(k, local[k])
+	var cs := _device(store)
+	if not policies.is_empty():
+		var cfg := FakeConfig.new()
+		cfg.policies = policies
+		cs.setup(cs.get("_storage"), store, cfg)
+	var r: Dictionary = await cs.pull()            # first sync uploads local
+	check(r.ok, "first sync ok")
+	server.put_raw("user-1", "save_v1", SnapKitCloudSave.make_envelope(remote_after, 7, "other", 9999999999))
+	r = await cs.pull()                            # local unchanged, remote changed
+	check(r.ok, "second pull ok")
+	return [store, r]
+
+
+func test_remote_false_never_relocks_earned_flag() -> void:
+	var res: Array = await _synced_then_remote_changes(
+		{"prog_mode_deepsea_unlocked": true, "prog_level": 3},
+		{"prog_mode_deepsea_unlocked": false, "prog_level": 5})
+	var store: Variant = res[0]
+	check_eq(store.get_value("prog_mode_deepsea_unlocked"), true, "earned flag stays unlocked")
+	check_eq(store.get_value("prog_level"), 5, "other types still take remote")
+	check_eq(res[1].applied, SnapKitCloudSave.APPLIED_MERGED, "kept local -> merged + pushed")
+	check_eq(_remote().get("prog_mode_deepsea_unlocked"), true, "remote repaired")
+
+
+func test_remote_missing_flag_never_relocks() -> void:
+	var res: Array = await _synced_then_remote_changes(
+		{"prog_ach_first": true, "prog_x": 1}, {"prog_x": 2})
+	check_eq(res[0].get_value("prog_ach_first"), true, "absent remotely -> still true")
+
+
+func test_remote_only_change_without_flags_is_plain_remote() -> void:
+	var res: Array = await _synced_then_remote_changes({"prog_level": 3}, {"prog_level": 1})
+	check_eq(res[0].get_value("prog_level"), 1, "no policy: remote wins on the take-remote path")
+	check_eq(res[1].applied, SnapKitCloudSave.APPLIED_REMOTE, "plain remote")
+
+
+func test_merge_policy_per_key() -> void:
+	var res: Array = await _synced_then_remote_changes(
+		{"prog_tutorial_seen": true, "prog_best": 900, "prog_name": "mine", "prog_flag_a": true},
+		{"prog_tutorial_seen": false, "prog_best": 500, "prog_name": "theirs", "prog_flag_a": false},
+		{"prog_tutorial_seen": "remote", "prog_best": "max", "prog_name": "local"})
+	var store: Variant = res[0]
+	check_eq(store.get_value("prog_tutorial_seen"), false, "'remote' opts a bool out of OR")
+	check_eq(store.get_value("prog_best"), 900, "'max' keeps the higher number on the remote path")
+	check_eq(store.get_value("prog_name"), "mine", "'local' keeps local")
+	check_eq(store.get_value("prog_flag_a"), true, "unlisted bool still monotonic")
+
+
+func test_policy_for_and_apply_policies() -> void:
+	var pol := {"prog_ach_*": "remote", "prog_ach_first": "or", "prog_*": "max"}
+	check_eq(SnapKitCloudSave.policy_for("prog_ach_first", pol), "or", "exact wins")
+	check_eq(SnapKitCloudSave.policy_for("prog_ach_boss", pol), "remote", "longest prefix wins")
+	check_eq(SnapKitCloudSave.policy_for("prog_level", pol), "max", "shorter prefix")
+	check_eq(SnapKitCloudSave.policy_for("other", pol), "", "no policy")
+	var out := SnapKitCloudSave.apply_policies({"a": false, "n": 1}, {"a": true, "n": 4}, {"a": false, "n": 1})
+	check_eq(out, {"a": true, "n": 1}, "default: bool OR, others keep base")
+	check_eq(SnapKitCloudSave.apply_policies({"a": 1}, {"a": true}, {"a": 1}), {"a": 1}, "type mismatch untouched")
