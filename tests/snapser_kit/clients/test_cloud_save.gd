@@ -70,11 +70,13 @@ func test_default_merge() -> void:
 	check_eq(m.n, 5, "numbers: max keeps int")
 	check_eq(m.b, [1, 2, 3], "arrays: union, local order first")
 	check_eq(m.c, "y", "else: newer (remote)")
-	check_eq(m.d, false, "bool: newer (remote)")
+	check_eq(m.d, true, "bool: OR (progress flag earned locally stays earned)")
 	check(m.l == 1 and m.r == 2, "one-sided keys kept")
 	m = SnapKitCloudSave.default_merge(local, remote, false)
 	check_eq(m.c, "x", "else: newer (local)")
-	check_eq(m.d, true, "bool: newer (local)")
+	check_eq(m.d, true, "bool: OR regardless of recency")
+	check_eq(SnapKitCloudSave.default_merge({"f": false}, {"f": true}, false).f, true, "bool: remote-only true kept")
+	check_eq(SnapKitCloudSave.default_merge({"f": false}, {"f": false}).f, false, "bool: both false")
 	check_eq(SnapKitCloudSave.default_merge({"p": PackedInt32Array([1])}, {"p": PackedInt32Array([1, 4])}).p,
 		PackedInt32Array([1, 4]), "packed arrays union")
 	check_eq(local, {"a": 1, "b": [1, 2], "c": "x", "d": true, "l": 1, "n": 5}, "inputs untouched")
@@ -379,3 +381,27 @@ func test_two_arg_import_prefix_store_is_supported() -> void:
 	check_eq(r.applied, SnapKitCloudSave.APPLIED_MERGED, "merged")
 	check_eq(store.data.get("prog_remote"), 9, "remote key imported through 2-arg import_prefix")
 	check_eq(store.data.get("prog_local"), 1, "local key kept")
+
+
+func test_applied_signal_lists_changed_keys() -> void:
+	server.put_raw("user-1", "save_v1",
+		SnapKitCloudSave.make_envelope({"prog_level": 5, "prog_new": true, "prog_same": 1}, 2, "other", 100))
+	var store := FakeSaveStore.new()
+	store.set_value("prog_level", 3)
+	store.set_value("prog_same", 1)
+	var cs := _device(store)
+	var got := []
+	cs.applied.connect(func(keys: PackedStringArray) -> void: got.append(keys))
+	var r: Dictionary = await cs.pull()
+	check(r.ok, "pull ok")
+	check_eq(got, [PackedStringArray(["prog_level", "prog_new"])], "only changed keys, sorted")
+	got.clear()
+	r = await cs.pull()
+	check_eq(got, [], "nothing imported -> no signal")
+
+
+func test_changed_keys() -> void:
+	check_eq(SnapKitCloudSave.changed_keys({"a": 1, "b": 2, "c": 3}, {"a": 1, "b": 5, "d": 1}),
+		PackedStringArray(["b", "c", "d"]), "changed, removed, added")
+	check_eq(SnapKitCloudSave.changed_keys({"a": 1}, {"a": 1.0}), PackedStringArray(["a"]), "type change counts")
+	check_eq(SnapKitCloudSave.changed_keys({"c": 3}, {}, false), PackedStringArray(), "removals optional")

@@ -134,9 +134,9 @@ func test_around_me() -> void:
 	check_eq(r.entries, [], "no entries")
 	t.respond(HTTPClient.METHOD_GET, BOARD, 404, {"error_code": 9000})
 	r = await lb.get_around_me("weekly")
-	check_eq(r.error, "http_404", "missing board stays an error")
+	check_eq(r.error, SnapKitErrors.NOT_FOUND, "missing board stays an error (9000 -> not_found)")
 	r = await lb.get_top("weekly")
-	check_eq(r.error, "http_404", "top 404 is an error")
+	check_eq(r.error, SnapKitErrors.NOT_FOUND, "top 404 is an error")
 
 
 func test_empty_page_and_offline() -> void:

@@ -183,3 +183,21 @@ func test_mock_latency_is_honoured() -> void:
 	var t0 := Time.get_ticks_msec()
 	check((await s.transport.request(GET, "/v1/item", null, {"auth": false})).ok, "ok")
 	check(Time.get_ticks_msec() - t0 >= 90, "waited for latency")
+
+
+func test_snap_code_and_named_errors() -> void:
+	var mock := SnapKitMockGateway.new()
+	mock.respond(PUT, "/v1/q/claim", 400, {"api_error_code": 15014, "message": "Quest not completed"})
+	mock.respond(PUT, "/v1/q/other", 400, {"api_error_code": 999})
+	mock.respond(PUT, "/v1/q/old", 404, {"error_code": 4000})
+	var s := mock_stack(mock)
+	var r: Dictionary = await s.transport.request(PUT, "/v1/q/claim", {})
+	check_eq(r.error, SnapKitErrors.QUEST_NOT_CLAIMABLE, "15014 -> quest_not_claimable")
+	check_eq(r.snap_code, 15014, "snap_code")
+	r = await s.transport.request(PUT, "/v1/q/other", {})
+	check_eq(r.error, "http_400", "unknown code keeps http_<status>")
+	check_eq(r.snap_code, 999, "unknown snap_code still reported")
+	r = await s.transport.request(PUT, "/v1/q/old", {})
+	check_eq(r.error, SnapKitErrors.UNDECLARED, "older error_code key understood")
+	r = await s.transport.request(GET, "/v1/missing")
+	check_eq(r.snap_code, 0, "no code in body -> 0")

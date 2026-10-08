@@ -33,7 +33,7 @@ const ACCESS_PROTECTED := "protected"
 const ACCESS_PUBLIC := "public"
 const BASE_PATH := "/v1/storage/owner/{user_id}"
 ## Snapser storage api_error_code for a CAS mismatch.
-const SNAP_ERR_CAS_MISMATCH := 5007
+const SNAP_ERR_CAS_MISMATCH := SnapKitErrors.SNAP_CAS_MISMATCH
 
 var _transport: SnapKitTransport
 
@@ -111,12 +111,9 @@ func get_cas(key: String, access: String = ACCESS_PRIVATE) -> Dictionary:
 
 
 ## Snapser's numeric api_error_code from an error body (0 if absent).
+## Kept for compatibility; see SnapKitErrors.snap_code / result["snap_code"].
 static func snap_error_code(json: Variant) -> int:
-	if json is Dictionary:
-		if (json as Dictionary).has("api_error_code"):
-			return SnapKitJson.get_int(json, "api_error_code")
-		return SnapKitJson.get_int(json, "error_code")
-	return 0
+	return SnapKitErrors.snap_code(json)
 
 
 ## Replace only if the server CAS still equals `cas` ("" = blob must not exist).

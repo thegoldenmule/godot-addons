@@ -230,3 +230,106 @@ func test_analytics_wire_format_end_to_end() -> void:
 	check_eq(seen.get("online_state", {}).get("online"), "1", "online flag as \"1\"")
 	check_eq(seen.get("run_end", {}), {"mode": "story", "result": "win", "score": "120",
 		"duration_s": "3", "flag": "1"}, "numbers/bools stringified")
+
+
+# ---- v0.2 ---------------------------------------------------------------------
+
+func test_wait_until_ready() -> void:
+	var idle := SnapKitService.new()
+	add_node(idle)
+	check(not await idle.wait_until_ready(), "before start -> false at once")
+	var svc := _service(mock_config(), SnapKitMockGateway.new())
+	check(not svc.is_online(), "not online before boot")
+	check(await svc.wait_until_ready(), "online after boot")
+	check(await svc.wait_until_ready(), "already booted -> immediate")
+	var off := _service(SnapKitConfig.from_dict({}))
+	check(not await off.wait_until_ready(), "offline config -> false")
+
+
+func test_force_offline_after_boot() -> void:
+	var mock := SnapKitMockGateway.new()
+	mock.respond(PUT, "/v1/statistics/user-stats/{u}/{k}", 200, {"value": "1"})
+	var svc := _service(mock_config(), mock)
+	await svc.boot_finished
+	check(svc.is_online(), "online")
+	var states := []
+	svc.online_changed.connect(func(v: bool) -> void: states.append(v))
+	var before := mock.requests.size()
+	svc.force_offline("capture run")
+	check_eq(states, [false], "online_changed(false)")
+	check(not svc.is_online(), "offline now")
+	check_eq((await svc.record_stat("hits", 1)).error, "offline", "calls return offline")
+	check_eq(mock.requests.size(), before, "no request after force_offline")
+	check_eq(svc.config.offline_reason, "capture run", "reason kept")
+
+
+func test_force_offline_before_start() -> void:
+	var svc := SpyService.new()
+	add_node(svc)
+	svc.force_offline("settings toggle")
+	svc.start_with_config(mock_config())
+	svc.auth.session_path = temp_path("svc_pre_off_%d.json" % randi())
+	await svc.boot_finished
+	check(svc.config.is_offline(), "config offline")
+	check_eq(svc.config.offline_reason, "settings toggle", "reason")
+
+
+func _declared_service(strict: bool, mock: SnapKitMockGateway) -> SnapKitService:
+	var svc := SnapKitService.new()
+	svc.strict_declarations = strict
+	add_node(svc)
+	svc.start_with_config(mock_config({"leaderboards": {"wins": "career_wins"},
+		"declared": {"stats": ["hits"], "boards": ["career_wins"], "events": ["run_end"]}}))
+	svc.auth.session_path = temp_path("svc_decl_%d.json" % randi())
+	svc.use_mock_gateway(track_mock(mock))
+	return svc
+
+
+func test_undeclared_debug_build_never_sends() -> void:
+	var mock := SnapKitMockGateway.new()
+	var svc := _declared_service(true, mock)
+	await svc.boot_finished
+	var before := mock.requests.size()
+	check_eq((await svc.record_stat("misses", 1)).error, SnapKitErrors.UNDECLARED, "stat")
+	check_eq((await svc.increment_stat("misses")).error, SnapKitErrors.UNDECLARED, "increment")
+	check_eq((await svc.submit_score("best", 5)).error, SnapKitErrors.UNDECLARED, "board")
+	check_eq(mock.requests.size(), before, "no network call")
+	var queued := svc.analytics_client.pending_count()
+	svc.track("faction_selected", {"f": "x"})
+	check_eq(svc.analytics_client.pending_count(), queued, "undeclared event dropped")
+	svc.track("run_end", {"mode": "m"})
+	check_eq(svc.analytics_client.pending_count(), queued + 1, "declared event queued")
+
+
+func test_undeclared_is_checked_before_offline() -> void:
+	var svc := SnapKitService.new()
+	svc.strict_declarations = true
+	add_node(svc)
+	svc.start_with_config(SnapKitConfig.from_dict({"declared": {"stats": ["hits"]}}))
+	await svc.boot_finished
+	check_eq((await svc.record_stat("typo_stat", 1)).error, SnapKitErrors.UNDECLARED,
+		"offline test runs still catch undeclared names")
+	check_eq((await svc.record_stat("hits", 1)).error, "offline", "declared -> offline as usual")
+
+
+func test_undeclared_release_build_still_sends() -> void:
+	var mock := SnapKitMockGateway.new()
+	mock.respond(PUT, "/v1/statistics/user-stats/{u}/{k}", 404, {"api_error_code": 4000})
+	var svc := _declared_service(false, mock)
+	await svc.boot_finished
+	var r: Dictionary = await svc.record_stat("misses", 1)
+	check_eq(mock.requests_to("/v1/statistics/").size(), 1, "sent once")
+	check_eq(r.error, SnapKitErrors.UNDECLARED, "server 4000 maps to the same code")
+	check_eq(r.snap_code, 4000, "snap_code")
+	var queued := svc.analytics_client.pending_count()
+	svc.track("faction_selected")
+	check_eq(svc.analytics_client.pending_count(), queued + 1, "release: event still queued")
+
+
+func test_cloud_save_applied_is_re_emitted() -> void:
+	var svc := _service(SnapKitConfig.from_dict({}))
+	await svc.boot_finished
+	var got := []
+	svc.cloud_save_applied.connect(func(keys: PackedStringArray) -> void: got.append(keys))
+	svc.cloud_save.applied.emit(PackedStringArray(["p_a", "p_b"]))
+	check_eq(got, [PackedStringArray(["p_a", "p_b"])], "re-emitted")

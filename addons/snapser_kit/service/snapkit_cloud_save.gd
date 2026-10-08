@@ -49,7 +49,8 @@ extends Node
 ##     writes; those are ignored while importing, so a pull never schedules a
 ##     push.
 ##   - pull() / push() are serialized (one at a time); concurrent callers wait.
-##   - default_merge(): per key — numbers take max, arrays take union, anything
+##   - default_merge(): per key — bools OR (progress flags), numbers take max,
+##     arrays take union, anything
 ##     else takes the newer side's value (by updated_at vs the last local change).
 ##   - Sync bookkeeping (last CAS, revision, synced hash, last local change,
 ##     device id) persists at state_path (STATE_PATH).
@@ -64,6 +65,11 @@ extends Node
 signal conflict(local: Dictionary, remote: Dictionary)
 ## A pull or push completed successfully. direction: "pull" | "push".
 signal synced(direction: String)
+## A pull or merge wrote remote data into the local store. keys = the synced
+## keys whose local value was added, changed or removed (sorted). Games refresh
+## caches / registries from it (SnapKitService re-emits it as
+## cloud_save_applied). Not emitted when the import changed nothing.
+signal applied(keys: PackedStringArray)
 signal _idle
 
 const DEBOUNCE_S := 10.0
@@ -204,8 +210,9 @@ func export_local() -> Dictionary:
 	return out
 
 
-## Per-key default merge of two `data` maps (see class doc). `remote_is_newer`
-## decides keys that are neither both numbers nor both arrays.
+## Per-key default merge of two `data` maps (see class doc): bools OR, numbers
+## max, arrays union; `remote_is_newer` decides everything else. Override
+## SnapKitService._merge() for a different policy (call this for the rest).
 static func default_merge(local: Dictionary, remote: Dictionary, remote_is_newer: bool = true) -> Dictionary:
 	var out := local.duplicate(true)
 	for k in remote:
@@ -214,7 +221,11 @@ static func default_merge(local: Dictionary, remote: Dictionary, remote_is_newer
 			out[k] = _copy(b)
 			continue
 		var a: Variant = out[k]
-		if _is_number(a) and _is_number(b):
+		if typeof(a) == TYPE_BOOL and typeof(b) == TYPE_BOOL:
+			# Progress flags (achievements, unlocks): earned on either device
+			# stays earned.
+			out[k] = a or b
+		elif _is_number(a) and _is_number(b):
 			out[k] = b if b > a else a
 		elif typeof(a) == typeof(b) and _is_array_like(a):
 			var merged: Variant = a.duplicate()
@@ -351,6 +362,8 @@ func _resolve(local: Dictionary, remote: Dictionary, remote_is_newer: bool) -> D
 
 
 func _import_local(data: Dictionary) -> void:
+	var before := export_local()
+	var can_replace := _import_arity() >= 3
 	_importing = true
 	for p in sync_prefixes():
 		var part := {}
@@ -360,11 +373,33 @@ func _import_local(data: Dictionary) -> void:
 		# Agent D's SaveService takes an optional third `replace` arg (drop local
 		# keys missing from `part`); the duck-typed contract only promises
 		# (prefix, data), so pass `replace` only when the store accepts it.
-		if _import_arity() >= 3:
+		if can_replace:
 			_store.call("import_prefix", p, part, true)
 		else:
 			_store.call("import_prefix", p, part)
 	_importing = false
+	var keys := changed_keys(before, data, can_replace)
+	if not keys.is_empty():
+		applied.emit(keys)
+
+
+## Keys whose value differs between `before` and `after` (added or changed; also
+## removed when `include_removed`), sorted.
+static func changed_keys(before: Dictionary, after: Dictionary, include_removed: bool = true) -> PackedStringArray:
+	var out := PackedStringArray()
+	for k in after:
+		if not before.has(k) or not _same(before[k], after[k]):
+			out.append(str(k))
+	if include_removed:
+		for k in before:
+			if not after.has(k):
+				out.append(str(k))
+	out.sort()
+	return out
+
+
+static func _same(a: Variant, b: Variant) -> bool:
+	return typeof(a) == typeof(b) and a == b
 
 
 func _import_arity() -> int:

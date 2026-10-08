@@ -19,6 +19,11 @@ extends RefCounted
 ## Resolution order (first match wins for "offline" / "gateway_url"):
 ##   1. SNAPSER_OFFLINE=1 in the environment, or `--snapser-offline` on the
 ##      command line (user args after `--` or engine args) -> forced offline.
+##   1b. A TEST / TOOL RUN -> offline unless SNAPSER_TESTS_ONLINE=1: any
+##      command-line arg (scene or --script path) or the main scene under
+##      res://tests/ or res://tools/ (also the bare "tests/..." / "tools/..."
+##      spellings). Headless suites therefore never touch the network even
+##      though the gateway is committed (DoD 7).
 ##   2. SNAPSER_GATEWAY_URL environment variable -> gateway_url.
 ##   3. user://snapser_kit.override.json, DEBUG BUILDS ONLY. May contain
 ##      "gateway_url" and/or "offline": true. Other keys are ignored.
@@ -30,6 +35,16 @@ extends RefCounted
 ## THE CLIENT NEVER READS AN API KEY. The Snapser platform key is a credential
 ## for snapctl / server tooling only.
 ##
+## Optional "declared" section (v0.2) mirrors what the snapend declares, so the
+## kit can catch undeclared names before the server 404s them:
+##   "declared": {"stats": [...], "boards": [...], "events": [...], "blobs": [...]}
+## A kind that is absent is not checked. Boards are SNAPSER board names (the
+## values of "leaderboards"). declaration_problems(manifest) cross-checks the
+## section against the game's snapser/snapend-manifest.json.
+##
+## force_offline(reason) switches a resolved config offline at runtime
+## (SnapKitService.force_offline() is the game-facing call).
+##
 ## Unknown top-level keys are preserved in `raw` so games and later kit versions
 ## can read optional sections (e.g. "quests") without a schema change here.
 
@@ -38,6 +53,11 @@ const OVERRIDE_PATH := "user://snapser_kit.override.json"
 const ENV_OFFLINE := "SNAPSER_OFFLINE"
 const ENV_GATEWAY := "SNAPSER_GATEWAY_URL"
 const ARG_OFFLINE := "--snapser-offline"
+const ENV_TESTS_ONLINE := "SNAPSER_TESTS_ONLINE"
+## Path prefixes that mark a test / tool run (rule 1b).
+const TEST_TOOL_PREFIXES := ["res://tests/", "res://tools/", "tests/", "tools/", "./tests/", "./tools/"]
+## Declaration kinds accepted under "declared".
+const DECLARED_KINDS := ["stats", "boards", "events", "blobs"]
 
 ## Values of `source` / `offline_reason`, for diagnostics and the editor page.
 const SOURCE_NONE := "none"
@@ -58,6 +78,9 @@ var cloud_save: Dictionary = {}
 var link_providers: PackedStringArray = PackedStringArray()
 ## The whole parsed committed file, including keys this class does not model.
 var raw: Dictionary = {}
+## kind ("stats"|"boards"|"events"|"blobs") -> PackedStringArray, only for the
+## kinds present in the committed "declared" section.
+var declared: Dictionary = {}
 
 # ---- Resolved connection -----------------------------------------------------
 ## https://gateway.snapser.com/<snapend-id>, no trailing slash. "" when offline.
@@ -82,8 +105,12 @@ static func from_project(path: String = DEFAULT_PATH) -> SnapKitConfig:
 		ENV_OFFLINE: OS.get_environment(ENV_OFFLINE),
 		ENV_GATEWAY: OS.get_environment(ENV_GATEWAY),
 	}
+	env[ENV_TESTS_ONLINE] = OS.get_environment(ENV_TESTS_ONLINE)
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
+	var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
+	if main_scene != "":
+		args.append(main_scene)
 	var is_debug := OS.is_debug_build()
 	var override := _read_json_file(OVERRIDE_PATH) if is_debug else {}
 	return resolve(committed, env, args, override, is_debug)
@@ -105,6 +132,9 @@ static func resolve(committed: Dictionary, env: Dictionary, args: PackedStringAr
 		return cfg._set_offline("%s=%s" % [ENV_OFFLINE, str(env.get(ENV_OFFLINE))])
 	if args.has(ARG_OFFLINE):
 		return cfg._set_offline(ARG_OFFLINE)
+	if is_test_or_tool_run(args) \
+			and not SnapKitJson.to_bool(str(env.get(ENV_TESTS_ONLINE, "")).strip_edges(), false):
+		return cfg._set_offline("test/tool run (set %s=1 to allow the network)" % ENV_TESTS_ONLINE)
 
 	# 2-4. First gateway source that is set wins.
 	var url := ""
@@ -146,6 +176,87 @@ static func resolve(committed: Dictionary, env: Dictionary, args: PackedStringAr
 ## offline = gateway_url is empty or invalid.
 static func from_dict(d: Dictionary) -> SnapKitConfig:
 	return resolve(d, {}, PackedStringArray(), {}, false)
+
+
+## Switch this config offline (idempotent). Returns self for chaining:
+##   SnapKitConfig.from_project().force_offline("capture run")
+func force_offline(reason: String = "forced offline") -> SnapKitConfig:
+	return _set_offline(reason if reason != "" else "forced offline")
+
+
+## True when any arg names a scene/script under res://tests/ or res://tools/
+## (rule 1b). Pass OS.get_cmdline_args() (+ user args, + the main scene).
+static func is_test_or_tool_run(args: PackedStringArray) -> bool:
+	for a in args:
+		var s := str(a).strip_edges()
+		for p in TEST_TOOL_PREFIXES:
+			if s.begins_with(p) and (p.begins_with("res://") or s.ends_with(".gd") or s.ends_with(".tscn") or s.ends_with(".scn")):
+				return true
+	return false
+
+
+## True when `kind` has a "declared" list.
+func has_declarations(kind: String) -> bool:
+	return declared.has(kind)
+
+
+## True when `name` is declared for `kind`, or when `kind` is not declared at
+## all (no list = no check).
+func is_declared(kind: String, name: String) -> bool:
+	if not declared.has(kind):
+		return true
+	return (declared[kind] as PackedStringArray).has(name)
+
+
+## Cross-check this config against a parsed snapend manifest
+## (snapser/snapend-manifest.json). Returns human-readable problems; empty =
+## consistent. Checks: every declared stat / board / event / blob exists on the
+## manifest; every mapped leaderboard and the cloud-save blob key exist there;
+## and, when a kind is declared, every manifest entry of that kind is declared
+## (so the lists cannot silently drift).
+func declaration_problems(manifest: Dictionary) -> PackedStringArray:
+	var on_server := manifest_names(manifest)
+	var out := PackedStringArray()
+	for kind in DECLARED_KINDS:
+		var server: PackedStringArray = on_server[kind]
+		if declared.has(kind):
+			for n in declared[kind]:
+				if not server.has(n):
+					out.append("%s '%s' is declared in the config but not on the snapend manifest" % [kind.trim_suffix("s"), n])
+			for n in server:
+				if not (declared[kind] as PackedStringArray).has(n):
+					out.append("%s '%s' is on the snapend manifest but missing from config \"declared.%s\"" % [kind.trim_suffix("s"), n, kind])
+	for logical in leaderboards:
+		var board := leaderboard_id(str(logical))
+		if not (on_server["boards"] as PackedStringArray).has(board):
+			out.append("leaderboards['%s'] -> '%s' is not a board on the snapend manifest" % [logical, board])
+	if not cloud_save_prefixes().is_empty() and not (on_server["blobs"] as PackedStringArray).has(cloud_save_blob_key()):
+		out.append("cloud_save blob '%s' is not a storage key on the snapend manifest" % cloud_save_blob_key())
+	return out
+
+
+## Names per kind on a snapend manifest: {stats, boards, events (custom user/app
+## events, not snap_* built-ins), blobs}.
+static func manifest_names(manifest: Dictionary) -> Dictionary:
+	var out := {"stats": PackedStringArray(), "boards": PackedStringArray(),
+		"events": PackedStringArray(), "blobs": PackedStringArray()}
+	for s in SnapKitJson.get_array(manifest, "settings"):
+		var data := SnapKitJson.get_dict(s, "data")
+		match SnapKitJson.get_str(s, "id"):
+			"statistics":
+				for e in SnapKitJson.get_array(data, "statistics"):
+					out.stats.append(SnapKitJson.get_str(e, "key"))
+			"leaderboards":
+				for e in SnapKitJson.get_array(data, "leaderboards"):
+					out.boards.append(SnapKitJson.get_str(e, "name"))
+			"analytics":
+				for e in SnapKitJson.get_array(data, "events"):
+					if not SnapKitJson.get_bool(e, "is_snap_event", false):
+						out.events.append(SnapKitJson.get_str(e, "name"))
+			"storage":
+				for e in SnapKitJson.get_array(data, "keys"):
+					out.blobs.append(SnapKitJson.get_str(e, "key"))
+	return out
 
 
 ## True when a usable gateway is configured and nothing forced offline.
@@ -235,6 +346,15 @@ func _apply_committed(d: Dictionary) -> void:
 	for p in SnapKitJson.get_array(d, "link_providers"):
 		if p is String and p != "":
 			link_providers.append(p)
+	declared = {}
+	var decl := SnapKitJson.get_dict(d, "declared")
+	for kind in DECLARED_KINDS:
+		if decl.get(kind) is Array:
+			var names := PackedStringArray()
+			for n in decl[kind]:
+				if n is String and n != "":
+					names.append(n)
+			declared[kind] = names
 
 
 func _set_offline(reason: String) -> SnapKitConfig:

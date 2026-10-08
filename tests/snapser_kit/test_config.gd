@@ -124,3 +124,72 @@ func test_from_project_missing_file_never_fails() -> void:
 	var c := SnapKitConfig.from_project("res://does_not_exist.json")
 	check(c.is_offline(), "offline")
 	check(c.describe().begins_with("offline: "), "describe offline")
+
+
+# ---- v0.2: test/tool rule, force_offline, declarations ------------------------
+
+func test_test_or_tool_run_forces_offline() -> void:
+	for args in [["res://tests/OnlineSmoke.tscn"], ["--script", "res://tools/x.gd"],
+			["tests/run.gd"], ["--headless", "./tools/build.tscn"]]:
+		var c := _resolve({}, PackedStringArray(args))
+		check(c.is_offline(), "offline for %s" % str(args))
+		check(c.offline_reason.begins_with("test/tool run"), "reason for %s" % str(args))
+	check(_resolve({}, PackedStringArray(["res://main.tscn", "tests"])).is_ready(), "normal run online")
+	check(_resolve({"SNAPSER_TESTS_ONLINE": "1"}, PackedStringArray(["res://tests/a.tscn"])).is_ready(),
+		"SNAPSER_TESTS_ONLINE=1 opts back in")
+	check(_resolve({"SNAPSER_TESTS_ONLINE": "1", "SNAPSER_OFFLINE": "1"},
+		PackedStringArray(["res://tests/a.tscn"])).is_offline(), "SNAPSER_OFFLINE still wins")
+
+
+func test_force_offline() -> void:
+	var c := SnapKitConfig.from_dict({"gateway_url": "https://g.test/x"})
+	check(c.is_ready(), "online first")
+	check(c.force_offline("capture run") == c, "chains")
+	check(c.is_offline(), "offline")
+	check_eq(c.gateway_url, "", "gateway cleared")
+	check_eq(c.offline_reason, "capture run", "reason")
+	check_eq(SnapKitConfig.from_dict({"gateway_url": "https://g.test/x"}).force_offline("").offline_reason,
+		"forced offline", "default reason")
+
+
+func test_declarations_parse_and_lookup() -> void:
+	var c := SnapKitConfig.from_dict({"declared": {"stats": ["hits", "", 3], "events": []}})
+	check(c.has_declarations("stats") and c.has_declarations("events"), "declared kinds")
+	check(not c.has_declarations("boards"), "absent kind")
+	check(c.is_declared("stats", "hits"), "declared stat")
+	check(not c.is_declared("stats", "misses"), "undeclared stat")
+	check(not c.is_declared("events", "run_end"), "empty list declares nothing")
+	check(c.is_declared("boards", "anything"), "absent kind is unchecked")
+	check_eq(c.declared.stats, PackedStringArray(["hits"]), "junk filtered")
+
+
+const MANIFEST := {"settings": [
+	{"id": "statistics", "data": {"statistics": [{"key": "hits"}, {"key": "misses"}]}},
+	{"id": "leaderboards", "data": {"leaderboards": [{"name": "career_wins"}]}},
+	{"id": "analytics", "data": {"events": [{"name": "run_end", "is_snap_event": false},
+		{"name": "snap_logins", "is_snap_event": true}]}},
+	{"id": "storage", "data": {"keys": [{"key": "save_v1"}]}},
+]}
+
+
+func test_declaration_problems() -> void:
+	var good := SnapKitConfig.from_dict({
+		"leaderboards": {"wins": "career_wins"},
+		"cloud_save": {"blob_key": "save_v1", "sync_prefixes": ["p_"]},
+		"declared": {"stats": ["hits", "misses"], "boards": ["career_wins"], "events": ["run_end"], "blobs": ["save_v1"]},
+	})
+	check_eq(good.declaration_problems(MANIFEST), PackedStringArray(), "consistent")
+	var names := SnapKitConfig.manifest_names(MANIFEST)
+	check_eq(names.events, PackedStringArray(["run_end"]), "snap_* built-ins excluded")
+	var bad := SnapKitConfig.from_dict({
+		"leaderboards": {"best": "best_accuracy"},
+		"cloud_save": {"blob_key": "save_v2", "sync_prefixes": ["p_"]},
+		"declared": {"stats": ["hits", "sinks"]},
+	})
+	var probs := bad.declaration_problems(MANIFEST)
+	var text := "\n".join(probs)
+	check(text.contains("stat 'sinks' is declared in the config but not on the snapend"), "extra stat")
+	check(text.contains("stat 'misses' is on the snapend manifest but missing"), "drifted stat")
+	check(text.contains("'best_accuracy' is not a board"), "unmapped board")
+	check(text.contains("blob 'save_v2'"), "blob key")
+	check_eq(probs.size(), 4, "exactly those 4")

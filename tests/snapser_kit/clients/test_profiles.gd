@@ -1,7 +1,7 @@
 extends "res://tests/snapser_kit/snapkit_test_case.gd"
 
 ## SnapKitProfiles: name policy (sanitize / length / word filter / custom
-## filter), default names, name_taken mapping, batch name resolution + cache.
+## filter), default names, batch name resolution + cache.
 
 const FakeTransport := preload("res://tests/snapser_kit/clients/fake_transport.gd")
 const PROFILE := "/v1/profiles/user/{uid}"
@@ -100,15 +100,6 @@ func test_set_display_name_rejections() -> void:
 	check_eq(r.error, SnapKitTransport.ERR_INVALID_ARGUMENT, "custom filter")
 	check_eq(r.display_name, "", "no name")
 	check_eq(t.calls.size(), 0, "no requests")
-
-
-func test_set_display_name_taken() -> void:
-	t.respond(HTTPClient.METHOD_PATCH, PROFILE, 409, {"error_code": 14012, "message": "Unique violation"})
-	var r: Dictionary = await profiles.set_display_name("Ada")
-	check(not r.ok, "not ok")
-	check_eq(r.error, SnapKitProfiles.ERR_NAME_TAKEN, "name_taken")
-	check_eq(r.display_name, "", "no name")
-	check_eq(SnapKitProfiles.cached_display_name("user-1"), "", "cache untouched")
 
 
 func test_fetch_display_names_batches_and_caches() -> void:

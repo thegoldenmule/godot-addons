@@ -11,6 +11,8 @@ Operational steps for a game that uses `addons/snapser_kit`. This repo is
 | `snapend-manifest.template.json` | here | Standard DEVELOPMENT snapend at the snap versions deployed 2026-10-08: auth v1.14.1, statistics v1.13.0, leaderboards v1.12.0, storage v1.14.0, profiles v1.13.0, analytics v1.12.0, remote-config v1.13.0. Anonymous login is **enabled** in dev, stage and prod; apple/google are present but `null`. Also includes: storage `save_v1` (private, external JSON blob), profiles `display_name`, the six standard analytics events, and an empty remote-config `v1`. **Statistics and leaderboards are empty on purpose: each game must declare its own.** Placeholders: `__SNAPEND_ID__`, `__SNAPEND_NAME__`. |
 | `snapend-manifest.quests.fragment.json` | here | Optional quests service definition + empty settings, for games that use quests. |
 | `smoke/run_smoke.sh`, `smoke/smoke.gd` | here | Live smoke test against one game's snapend. |
+| `check_declarations.sh` | here | Offline check that the config's `"declared"` section, boards and cloud-save blob match `snapser/snapend-manifest.json`. |
+| `clear_board_rows.sh` | here | Admin. Lists named users' rows on a dev snapend board (`--dry-run`). Uses the platform key only to confirm the snapend is DEVELOPMENT. **It can't delete:** Snapser has no row-delete API, so it prints the console steps. |
 | `snapser/snapend-manifest.json` | game repo | That game's snapend as code (from the template). |
 | `game/snapser_kit.config.json` | game repo | Committed client config: `game_id`, `gateway_url`, boards, cloud-save keys, link providers, optional `"quests": true`. |
 
@@ -58,6 +60,16 @@ Operational steps for a game that uses `addons/snapser_kit`. This repo is
 5. Write `game/snapser_kit.config.json` with the gateway URL (`https://gateway.snapser.com/<snapend-id>`) and the boards.
 6. Run the smoke test (below). For Web exports, also check CORS from the hosting origin.
 
+## Declarations
+
+After editing the manifest, mirror the names in the client config's `"declared"` section and check:
+
+```bash
+tools/snapser/check_declarations.sh ../Sovereign-Battleships
+```
+
+In debug builds the kit refuses undeclared names locally (`error: "undeclared"`). The server's own 404s (stat 4000, event 2000) map to the same code.
+
 ## Analytics events
 
 Snapser analytics properties are typed `string`, `number` or `timestamp`; there is **no boolean**. On the wire, **every property value is a string**, and the body must carry `user_id`. `SnapKitAnalytics` handles both:
@@ -80,6 +92,7 @@ tools/snapser/smoke/run_smoke.sh ../Sovereign-Battleships            # finds gam
 tools/snapser/smoke/run_smoke.sh path/to/snapser_kit.config.json --stat=hits --board=career_wins --verbose
 ```
 
+- **Smoke identity:** pass `--session-file=<abs path>` to reuse the same smoke user, especially under an isolated `HOME`, where `user://` moves and the default file would mint a new user and new board rows. At the end the run prints the user id and every board it wrote.
 - It uses this repo's kit build, and the gateway **only** from the given config. It refuses if `SNAPSER_GATEWAY_URL` points elsewhere, and refuses non-https or placeholder URLs.
 - It keeps one persisted smoke user per game (`user://snapkit_smoke_<game_id>.json` in this project's user dir).
 - It checks:
@@ -105,3 +118,24 @@ tools/snapser/smoke/run_smoke.sh path/to/snapser_kit.config.json --stat=hits --b
   - If the provider user is new, the kit associates it onto the anonymous user (keep = anon, discard = provider).
   - If the provider account already exists, the kit returns `account_exists`, and the game may `switch_account()`.
   - Apple sends the authorization code: single-use, never retried.
+
+## Clearing test rows from a board
+
+Leaderboard rows can't be deleted through any API. The leaderboards snap only has Get, Set and Increment. The snapend gateway rejects the platform key ("API key not found", 16). snapctl has no row or user commands.
+
+`clear_board_rows.sh --dry-run` finds the rows:
+
+```bash
+tools/snapser/clear_board_rows.sh --snapend <id> --board career_wins --user <uid> [--user …] --dry-run
+tools/snapser/clear_board_rows.sh --snapend <id> --board career_wins --all-rows --dry-run   # pre-ship test boards
+```
+
+- It reads the key from `~/.snapser/config` (the wrapper unsets the env var) and uses it only to confirm the snapend is DEVELOPMENT. The key is never printed.
+- It reads the board as `--session-file` (e.g. the smoke identity) or as a fixed anonymous "admin reader" user that never writes.
+- Then delete the rows by hand in the console, using either:
+  - the **Leaderboards** tool, or
+  - **User Manager → Bulk User Data → Reset**, with the printed user ids. This works on dev snapends only, and resets all of those users' snap data except Auth.
+
+## Test and tool runs stay offline
+
+The kit treats any run whose scene or script, or the main scene, is under `res://tests/` or `res://tools/` as offline, unless `SNAPSER_TESTS_ONLINE=1` is set. A committed gateway therefore never puts headless suites online (DoD 7).

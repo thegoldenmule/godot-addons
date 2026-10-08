@@ -69,11 +69,13 @@ func test_quests_post_not_retried() -> void:
 	check_eq(r.reward, {"coins": 5}, "reward")
 
 
-func test_profiles_name_taken_and_remote_config() -> void:
+func test_profiles_duplicate_name_allowed_and_remote_config() -> void:
+	# D33: names are not unique, so a second player may store the same name.
 	var profiles := SnapKitProfiles.new(transport)
-	mock.respond(HTTPClient.METHOD_PATCH, "/v1/profiles/user/{uid}", 409, {"error_code": 14012})
-	var r: Dictionary = await profiles.set_display_name("Taken")
-	check_eq(r.error, SnapKitProfiles.ERR_NAME_TAKEN, "name_taken")
+	mock.respond(HTTPClient.METHOD_PATCH, "/v1/profiles/user/{uid}", 200, {"profile": {"display_name": "Same Name"}})
+	var r: Dictionary = await profiles.set_display_name("Same Name")
+	check(r.ok, "duplicate names are fine")
+	check_eq(r.display_name, "Same Name", "stored")
 	var rc := SnapKitRemoteConfig.new(transport)
 	mock.respond(HTTPClient.METHOD_GET, "/v1/remote-config/app-config/{v}", 200, {"config": {"k": {"a": 1}}})
 	r = await rc.fetch_app_config()
