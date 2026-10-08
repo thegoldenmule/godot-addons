@@ -9,6 +9,7 @@ const SCRIPTS := [
 	"res://addons/snapser_kit/core/snapkit_auth.gd",
 	"res://addons/snapser_kit/core/snapkit_transport.gd",
 	"res://addons/snapser_kit/core/snapkit_json.gd",
+	"res://addons/snapser_kit/core/snapkit_errors.gd",
 	"res://addons/snapser_kit/clients/snapkit_stats.gd",
 	"res://addons/snapser_kit/clients/snapkit_leaderboards.gd",
 	"res://addons/snapser_kit/clients/snapkit_storage.gd",
@@ -58,4 +59,4 @@ func test_transport_helpers() -> void:
 	check(SnapKitTransport.is_retryable({"status": 503, "error": "http_503"}), "5xx retryable")
 	check(not SnapKitTransport.is_retryable({"status": 404, "error": "http_404"}), "404 not retryable")
 	var r := SnapKitTransport.error_result(SnapKitTransport.ERR_OFFLINE)
-	check_eq(r.keys(), ["ok", "status", "json", "error"], "result shape")
+	check_eq(r.keys(), ["ok", "status", "json", "error", "snap_code"], "result shape")

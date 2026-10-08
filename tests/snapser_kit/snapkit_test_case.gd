@@ -55,10 +55,13 @@ func wait(seconds: float) -> void:
 	await tree.create_timer(seconds).timeout
 
 
-## A fresh user:// path for this test (file removed if it exists).
+## A fresh path for this test under the kit's sandbox root (never user://;
+## the runner sets SnapKitConfig.data_root to a scratch dir). File removed if it
+## exists.
 func temp_path(file_name: String) -> String:
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://snapkit_tests"))
-	var p := "user://snapkit_tests/" + file_name
+	var dir := SnapKitConfig.data_root.path_join("snapkit_tests")
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
+	var p := dir.path_join(file_name)
 	if FileAccess.file_exists(p):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(p))
 	return p

@@ -145,6 +145,7 @@ func _fetch(board: String, range_kind: String, count: int) -> Dictionary:
 			and _snap_error_code(res.json) != SNAP_ERR_BOARD_NOT_FOUND:
 		res.ok = true
 		res.error = ""
+		res.snap_code = 0
 		res.names_resolved = true
 		return res
 	if not res.ok:

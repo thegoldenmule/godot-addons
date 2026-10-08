@@ -95,6 +95,10 @@ signal session_ready(user_id: String)
 signal cloud_save_conflict(local: Dictionary, remote: Dictionary)
 ## Remote config was fetched/refreshed.
 signal config_updated(config: Dictionary)
+## A cloud-save pull / merge wrote remote data into the local save store. keys
+## = synced keys added, changed or removed. Refresh caches and registries here
+## instead of watching the store's `changed` signal.
+signal cloud_save_applied(keys: PackedStringArray)
 
 const ConfigScript := preload("res://addons/snapser_kit/core/snapkit_config.gd")
 const AuthScript := preload("res://addons/snapser_kit/core/snapkit_auth.gd")
@@ -135,6 +139,14 @@ signal boot_finished
 ## Errors specific to the service (transport ERR_* codes are reused otherwise).
 const ERR_NOT_STARTED := "not_started"
 const ERR_NO_PROVIDER := "no_provider"
+## A stat / board / event / blob that the config's "declared" section does not
+## list (same code the server's 404s map to).
+const ERR_UNDECLARED := SnapKitErrors.UNDECLARED
+
+## Debug builds: an undeclared name returns {ok:false, error:"undeclared"} (or
+## drops the event) without a network call. Release builds: warn once, send
+## anyway. Tests may flip it.
+var strict_declarations: bool = OS.is_debug_build()
 
 var _remote_config: Dictionary = {}
 var _display_name: String = ""
@@ -145,6 +157,8 @@ var _online_reported: bool = false
 var _identity_bridges: Dictionary = {}
 var _session_started_ms: int = 0
 var _session_open: bool = false
+var _warned_undeclared: Dictionary = {}
+var _pending_offline_reason: String = ""
 
 
 # ---- Lifecycle ---------------------------------------------------------------
@@ -164,6 +178,11 @@ func start_with_config(cfg: SnapKitConfig) -> void:
 		return
 	_started = true
 	config = cfg
+	if _pending_offline_reason != "":
+		config.force_offline(_pending_offline_reason)
+	if config.has_declarations("blobs") and config.cloud_save_enabled() \
+			and not config.is_declared("blobs", config.cloud_save_blob_key()):
+		_warn_undeclared("blobs", config.cloud_save_blob_key())
 
 	transport = TransportScript.new()
 	transport.name = "SnapKitTransport"
@@ -202,6 +221,8 @@ func start_with_config(cfg: SnapKitConfig) -> void:
 	cloud_save.merge_func = _merge
 	cloud_save.conflict.connect(func(l: Dictionary, r: Dictionary) -> void:
 		cloud_save_conflict.emit(l, r))
+	cloud_save.applied.connect(func(keys: PackedStringArray) -> void:
+		cloud_save_applied.emit(keys))
 
 	_open_analytics_session()
 	_boot.call_deferred()
@@ -217,6 +238,33 @@ func use_mock_gateway(mock: SnapKitMockGateway) -> void:
 ## True once the deferred startup sequence has completed.
 func is_booted() -> bool:
 	return _booted
+
+
+## Wait for the startup sequence, then return is_online(). Resolves at once when
+## already booted; returns false at once before start(). COROUTINE:
+##   if await Snapser.wait_until_ready(): ...
+## Use it in screens that read online state in _ready(): is_online() is false
+## until boot has logged in.
+func wait_until_ready() -> bool:
+	if not _started:
+		return false
+	if not _booted:
+		await boot_finished
+	return is_online()
+
+
+## Force offline for the rest of the process (capture runs, a settings toggle,
+## tests). Before start() it applies to the config start() resolves; after,
+## every call returns {ok:false, error:"offline"} immediately and
+## online_changed(false) fires if the kit was online. There is no way back
+## online short of restarting the service: re-resolve and start a new one.
+func force_offline(reason: String = "forced offline") -> void:
+	if config == null:
+		_pending_offline_reason = reason if reason != "" else "forced offline"
+		return
+	config.force_offline(reason)
+	if _online or not _online_reported:
+		_set_online(false, config.offline_reason)
 
 
 func _boot() -> void:
@@ -239,7 +287,8 @@ func _boot() -> void:
 		_set_online(true, "session")
 	await refresh_remote_config()
 	await refresh_profile()
-	if cloud_save.is_enabled():
+	if cloud_save.is_enabled() and (not strict_declarations
+			or config.is_declared("blobs", config.cloud_save_blob_key())):
 		await cloud_save.pull()
 	_finish_boot()
 
@@ -308,7 +357,9 @@ static func is_valid_save_store(store: Object) -> bool:
 
 # ---- Status ------------------------------------------------------------------
 
-## Configured, not forced offline, and holding a session.
+## Configured, not forced offline, and holding a session. NOTE: false until the
+## deferred boot has logged in (and always before start()); screens that check
+## it in _ready() should `await wait_until_ready()` first.
 func is_online() -> bool:
 	return config != null and config.is_ready() and auth != null and auth.has_session()
 
@@ -324,7 +375,7 @@ func user_id() -> String:
 
 ## Set a user stat. key must match ^[a-z0-9_]+$. -> {ok, error, value?}
 func record_stat(key: String, value: int) -> Dictionary:
-	var gate := _gate()
+	var gate := _gate(false, "stats", key)
 	if not gate.is_empty():
 		return gate
 	return await stats_client.set_stat(key, value)
@@ -332,7 +383,7 @@ func record_stat(key: String, value: int) -> Dictionary:
 
 ## Add delta to a user stat. -> {ok, error, value?} (new total)
 func increment_stat(key: String, delta: int = 1) -> Dictionary:
-	var gate := _gate()
+	var gate := _gate(false, "stats", key)
 	if not gate.is_empty():
 		return gate
 	return await stats_client.increment_stat(key, delta)
@@ -343,7 +394,7 @@ func increment_stat(key: String, delta: int = 1) -> Dictionary:
 ## through). Entries: {user_id, display_name, score, rank, is_me}.
 
 func submit_score(board: String, score: int) -> Dictionary:
-	var gate := _gate()
+	var gate := _gate(false, "boards", config.leaderboard_id(board) if config != null else board)
 	if not gate.is_empty():
 		return gate
 	return await leaderboards_client.submit_score(config.leaderboard_id(board), score)
@@ -390,7 +441,7 @@ func refresh_remote_config() -> Dictionary:
 
 ## Upload synced local keys now (bypasses the debounce). -> {ok, error, conflict?}
 func cloud_save_push() -> Dictionary:
-	var gate := _gate()
+	var gate := _gate(false, "blobs", config.cloud_save_blob_key() if config != null else "")
 	if not gate.is_empty():
 		return gate
 	if not cloud_save.is_enabled():
@@ -400,7 +451,7 @@ func cloud_save_push() -> Dictionary:
 
 ## Fetch + reconcile now. -> {ok, error, applied?}
 func cloud_save_pull() -> Dictionary:
-	var gate := _gate()
+	var gate := _gate(false, "blobs", config.cloud_save_blob_key() if config != null else "")
 	if not gate.is_empty():
 		return gate
 	if not cloud_save.is_enabled():
@@ -422,8 +473,13 @@ func _merge(local: Dictionary, remote: Dictionary) -> Dictionary:
 ## Queue an analytics event (snake_case name, flat props). Never blocks; dropped
 ## silently offline once the buffer cap is reached, and before start().
 func track(event: String, props: Dictionary = {}) -> void:
-	if analytics_client != null:
-		analytics_client.track(event, props)
+	if analytics_client == null:
+		return
+	if config != null and not config.is_declared("events", event):
+		_warn_undeclared("events", event)
+		if strict_declarations:
+			return
+	analytics_client.track(event, props)
 
 
 # ---- Identity ----------------------------------------------------------------
@@ -558,11 +614,28 @@ func quests_claim(quest: String) -> Dictionary:
 
 
 ## {} when a network call may proceed, else the error result to return.
-func _gate(needs_quests: bool = false) -> Dictionary:
+## Declaration check (kind/name) runs BEFORE the offline gate, so offline test
+## runs catch undeclared names too.
+func _gate(needs_quests: bool = false, kind: String = "", item: String = "") -> Dictionary:
 	if not _started or config == null:
 		return SnapKitTransport.error_result(ERR_NOT_STARTED)
+	if kind != "" and not config.is_declared(kind, item):
+		_warn_undeclared(kind, item)
+		if strict_declarations:
+			return SnapKitTransport.error_result(ERR_UNDECLARED)
 	if config.is_offline():
 		return SnapKitTransport.error_result(SnapKitTransport.ERR_OFFLINE)
 	if needs_quests and quests_client == null:
 		return SnapKitTransport.error_result(SnapKitTransport.ERR_DISABLED)
 	return {}
+
+
+## One push_warning per (kind, name) per process.
+func _warn_undeclared(kind: String, item: String) -> void:
+	var k := "%s/%s" % [kind, item]
+	if _warned_undeclared.has(k):
+		return
+	_warned_undeclared[k] = true
+	push_warning("[SnapKit] %s '%s' is not in snapser_kit.config.json \"declared.%s\" — the snapend will reject it (404). %s"
+		% [kind.trim_suffix("s"), item, kind,
+			"Not sent (debug build)." if strict_declarations else "Sending anyway (release build)."])

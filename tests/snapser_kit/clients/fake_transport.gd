@@ -101,8 +101,9 @@ func request(method: int, path: String, body: Variant = null, opts: Dictionary =
 			return error_result(str(out.error))
 		var status := int(out.get("status", 200))
 		var text := JSON.stringify(out.json) if out.has("json") and out.json != null else ""
-		var ok := status >= 200 and status < 300
-		return make_result(ok, status, SnapKitJson.parse(text), "" if ok else http_error(status))
+		# Same status/body -> result mapping as the real transport (error codes,
+		# snap_code), so client tests see what a live call would return.
+		return _to_result({"status": status, "text": text})
 	return make_result(false, 404, null, http_error(404))
 
 

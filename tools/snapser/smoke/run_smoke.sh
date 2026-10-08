@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Live smoke test of one game's DEVELOPMENT snapend using this repo's snapser_kit.
 #
-#   tools/snapser/smoke/run_smoke.sh <game repo or project dir | path to snapser_kit.config.json> [--stat=<declared key>] [--board=<logical>] [--verbose]
+#   tools/snapser/smoke/run_smoke.sh <game repo or project dir | path to snapser_kit.config.json> [--session-file=<path>] [--stat=<declared key>] [--board=<logical>] [--verbose]
 #
 # The gateway comes ONLY from the game's committed snapser_kit.config.json
 # (looked up at <repo>/game/snapser_kit.config.json, then
 # <repo>/snapser_kit.config.json). smoke.gd refuses to run if
 # SNAPSER_GATEWAY_URL points anywhere else. No API key is read or needed.
+# Under an isolated HOME, pass --session-file=<abs path> to reuse the same smoke
+# identity (user:// follows HOME, so the default file would be a new user).
 #
 # Env: GODOT (default /Applications/Godot.app/Contents/MacOS/Godot, else `godot` on PATH).
 set -euo pipefail

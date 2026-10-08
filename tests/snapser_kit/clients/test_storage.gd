@@ -65,7 +65,8 @@ func test_cas_conflicts_detected() -> void:
 	check(r.remote_cas != "", "remote cas reported")
 	r = await st.put_json_blob_cas("k", {"v": 1}, "stale")
 	check(not r.ok and r.conflict, "stale cas -> conflict")
-	check_eq(r.error, "http_400", "http error kept")
+	check_eq(r.error, SnapKitErrors.CAS_CONFLICT, "5007 -> cas_conflict")
+	check_eq(r.snap_code, 5007, "snap_code")
 	check(r.remote_cas != "", "remote cas read back")
 	check_eq(t.calls_to("/v1/storage/owner/user-1/private/cas/").size(), 0,
 		"never uses the plain-blob /cas/ route (live: 400 5001 on JSON blobs)")

@@ -35,11 +35,15 @@ extends Node
 ##                                      codes on /v1/auth/login/apple).
 ##
 ## Result (always this shape, never throws, never pushes errors):
-##   { "ok": bool, "status": int, "json": Variant, "error": String }
+##   { "ok": bool, "status": int, "json": Variant, "error": String, "snap_code": int }
 ##   ok      true iff an HTTP 2xx response was received.
 ##   status  HTTP status, or 0 when no response (offline / timeout / network).
 ##   json    Parsed body (SnapKitJson.parse — lenient), or null.
-##   error   "" when ok, else one of the ERR_* codes below, or "http_<status>".
+##   error   "" when ok, else one of the ERR_* codes below, a named
+##           SnapKitErrors code when Snapser's api_error_code is known (e.g.
+##           "quest_not_claimable", "undeclared", "cas_conflict"), or
+##           "http_<status>".
+##   snap_code  Snapser's api_error_code (0 when absent / not an HTTP error).
 ##
 ## 401 rule (ALL methods unless "no_retry"): when "auth" is true and the response is 401, the
 ## transport calls auth.reauth() once (keeping the same anonymous handle) and
@@ -194,7 +198,8 @@ static func _to_result(raw: Dictionary) -> Dictionary:
 	var json: Variant = SnapKitJson.parse(str(raw.get("text", "")))
 	if status >= 200 and status < 300:
 		return make_result(true, status, json, "")
-	return make_result(false, status, json, http_error(status))
+	var code := SnapKitErrors.snap_code(json)
+	return make_result(false, status, json, SnapKitErrors.kit_error(code, status), code)
 
 
 func _sleep(seconds: float) -> void:
@@ -213,8 +218,8 @@ static func backoff_delay(attempt: int) -> float:
 # ---- Pure helpers (implemented; usable by clients and tests) -----------------
 
 ## Build a result dictionary in the canonical shape.
-static func make_result(ok: bool, status: int, json: Variant, error: String) -> Dictionary:
-	return {"ok": ok, "status": status, "json": json, "error": error}
+static func make_result(ok: bool, status: int, json: Variant, error: String, snap_code: int = 0) -> Dictionary:
+	return {"ok": ok, "status": status, "json": json, "error": error, "snap_code": snap_code}
 
 
 static func ok_result(json: Variant = null, status: int = 200) -> Dictionary:

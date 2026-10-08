@@ -13,8 +13,16 @@ extends Node
 ## export_prefix / import_prefix are required (is_enabled() checks has_method);
 ## without the `changed` signal, cloud save still works but only pushes when
 ## asked (push(), pause / focus-out) — there is no debounce trigger.
-## Only keys under SnapKitConfig.cloud_save_prefixes() are synced (e.g.
-## "sax_prog_"); everything else (settings) stays local.
+## Only keys under SnapKitConfig.cloud_save_prefixes() (e.g. "sax_prog_") plus
+## the exact names in cloud_save_keys() ("sync_keys", for legacy keys with no
+## shared prefix) are synced; everything else (settings) stays local. Exact
+## keys are imported one by one WITHOUT `replace`, so they never remove sibling
+## keys that merely start with the same text; a pull adds/overwrites them but
+## never deletes them.
+##
+## No files in offline / test runs: the state file (state_path) is written only
+## while the config is online. Offline, the bookkeeping lives in memory; the
+## first online pull treats unsynced local changes of unknown age as recent.
 ##
 ## Blob (key = SnapKitConfig.cloud_save_blob_key(), default "save_v1", access
 ## private):
@@ -49,10 +57,11 @@ extends Node
 ##     writes; those are ignored while importing, so a pull never schedules a
 ##     push.
 ##   - pull() / push() are serialized (one at a time); concurrent callers wait.
-##   - default_merge(): per key — numbers take max, arrays take union, anything
+##   - default_merge(): per key — bools OR (progress flags), numbers take max,
+##     arrays take union, anything
 ##     else takes the newer side's value (by updated_at vs the last local change).
 ##   - Sync bookkeeping (last CAS, revision, synced hash, last local change,
-##     device id) persists at state_path (STATE_PATH).
+##     device id) persists at state_path (STATE_FILE under SnapKitConfig.data_root).
 ##   - Offline: pull()/push() return the transport's {ok:false, error:"offline"};
 ##     local play is unaffected and the next pause / change retries.
 ##
@@ -64,10 +73,17 @@ extends Node
 signal conflict(local: Dictionary, remote: Dictionary)
 ## A pull or push completed successfully. direction: "pull" | "push".
 signal synced(direction: String)
+## A pull or merge wrote remote data into the local store. keys = the synced
+## keys whose local value was added, changed or removed (sorted). Games refresh
+## caches / registries from it (SnapKitService re-emits it as
+## cloud_save_applied). Not emitted when the import changed nothing.
+signal applied(keys: PackedStringArray)
 signal _idle
 
 const DEBOUNCE_S := 10.0
 const BLOB_FORMAT_VERSION := 1
+const STATE_FILE := "snapser_kit_cloud_save.json"
+## Default location when SnapKitConfig.data_root is user:// (kept for reference).
 const STATE_PATH := "user://snapser_kit_cloud_save.json"
 const DEFAULT_BLOB_KEY := "save_v1"
 const ENCODING := "godot_native"
@@ -85,7 +101,7 @@ var merge_func: Callable
 ## Seconds of quiet after the last local change before an automatic push.
 var debounce_s: float = DEBOUNCE_S
 ## Where sync bookkeeping persists (tests point it at a scratch file).
-var state_path: String = STATE_PATH
+var state_path: String = SnapKitConfig.data_path(STATE_FILE)
 ## Storage access type of the blob.
 var access: String = SnapKitStorage.ACCESS_PRIVATE
 ## Set just before merge_func is called: true when the remote blob's updated_at
@@ -122,14 +138,30 @@ func setup(storage: SnapKitStorage, store: Object, config: SnapKitConfig) -> voi
 
 
 ## True when storage and a store with export_prefix/import_prefix are wired and
-## the config lists at least one sync prefix.
+## the config lists at least one sync prefix or exact sync key.
 func is_enabled() -> bool:
 	return _storage != null and _store != null and _store.has_method("export_prefix") \
-		and _store.has_method("import_prefix") and not sync_prefixes().is_empty()
+		and _store.has_method("import_prefix") \
+		and (not sync_prefixes().is_empty() or not sync_keys().is_empty())
 
 
 func sync_prefixes() -> PackedStringArray:
 	return _config.cloud_save_prefixes() if _config != null else PackedStringArray()
+
+
+## Exact key names synced alongside the prefixes ("sync_keys").
+func sync_keys() -> PackedStringArray:
+	return _config.cloud_save_keys() if _config != null else PackedStringArray()
+
+
+## True when `key` is synced (under a prefix or an exact sync key).
+func is_synced_key(key: String) -> bool:
+	if sync_keys().has(key):
+		return true
+	for p in sync_prefixes():
+		if key.begins_with(p):
+			return true
+	return false
 
 
 func blob_key() -> String:
@@ -201,11 +233,19 @@ func export_local() -> Dictionary:
 		var part: Variant = _store.call("export_prefix", p)
 		if part is Dictionary:
 			out.merge(part, true)
+	for k in sync_keys():
+		if out.has(k):
+			continue
+		# The duck-typed store only exports by prefix: keep the exact key only.
+		var one: Variant = _store.call("export_prefix", k)
+		if one is Dictionary and (one as Dictionary).has(k):
+			out[k] = one[k]
 	return out
 
 
-## Per-key default merge of two `data` maps (see class doc). `remote_is_newer`
-## decides keys that are neither both numbers nor both arrays.
+## Per-key default merge of two `data` maps (see class doc): bools OR, numbers
+## max, arrays union; `remote_is_newer` decides everything else. Override
+## SnapKitService._merge() for a different policy (call this for the rest).
 static func default_merge(local: Dictionary, remote: Dictionary, remote_is_newer: bool = true) -> Dictionary:
 	var out := local.duplicate(true)
 	for k in remote:
@@ -214,7 +254,11 @@ static func default_merge(local: Dictionary, remote: Dictionary, remote_is_newer
 			out[k] = _copy(b)
 			continue
 		var a: Variant = out[k]
-		if _is_number(a) and _is_number(b):
+		if typeof(a) == TYPE_BOOL and typeof(b) == TYPE_BOOL:
+			# Progress flags (achievements, unlocks): earned on either device
+			# stays earned.
+			out[k] = a or b
+		elif _is_number(a) and _is_number(b):
 			out[k] = b if b > a else a
 		elif typeof(a) == typeof(b) and _is_array_like(a):
 			var merged: Variant = a.duplicate()
@@ -287,6 +331,11 @@ func _pull_locked(attempt: int) -> Dictionary:
 		return got
 	var local := export_local()
 	var local_hash := data_hash(local)
+	if bool(_state.get("has_synced", false)) and local_hash != str(_state.get("synced_hash", "")) \
+			and int(_state.get("local_changed_at", 0)) <= int(_state.get("synced_at", 0)):
+		# Local changed since the last sync but its time was not persisted (an
+		# offline run writes no state file): treat the change as just made.
+		_state["local_changed_at"] = int(Time.get_unix_time_from_system())
 	var has_synced := bool(_state.get("has_synced", false))
 	var local_changed := (local_hash != str(_state.get("synced_hash", ""))) if has_synced else not local.is_empty()
 
@@ -351,6 +400,8 @@ func _resolve(local: Dictionary, remote: Dictionary, remote_is_newer: bool) -> D
 
 
 func _import_local(data: Dictionary) -> void:
+	var before := export_local()
+	var can_replace := _import_arity() >= 3
 	_importing = true
 	for p in sync_prefixes():
 		var part := {}
@@ -360,11 +411,41 @@ func _import_local(data: Dictionary) -> void:
 		# Agent D's SaveService takes an optional third `replace` arg (drop local
 		# keys missing from `part`); the duck-typed contract only promises
 		# (prefix, data), so pass `replace` only when the store accepts it.
-		if _import_arity() >= 3:
+		if can_replace:
 			_store.call("import_prefix", p, part, true)
 		else:
 			_store.call("import_prefix", p, part)
+	for k in sync_keys():
+		if not data.has(k) or _under_prefix(k):
+			continue
+		# Exact keys: never `replace` (it would drop siblings sharing the text).
+		if can_replace:
+			_store.call("import_prefix", k, {k: data[k]}, false)
+		else:
+			_store.call("import_prefix", k, {k: data[k]})
 	_importing = false
+	var keys := changed_keys(before, export_local())
+	if not keys.is_empty():
+		applied.emit(keys)
+
+
+## Keys whose value differs between `before` and `after` (added or changed; also
+## removed when `include_removed`), sorted.
+static func changed_keys(before: Dictionary, after: Dictionary, include_removed: bool = true) -> PackedStringArray:
+	var out := PackedStringArray()
+	for k in after:
+		if not before.has(k) or not _same(before[k], after[k]):
+			out.append(str(k))
+	if include_removed:
+		for k in before:
+			if not after.has(k):
+				out.append(str(k))
+	out.sort()
+	return out
+
+
+static func _same(a: Variant, b: Variant) -> bool:
+	return typeof(a) == typeof(b) and a == b
 
 
 func _import_arity() -> int:
@@ -383,13 +464,18 @@ func _record_sync(cas: String, content_hash: String, version: int) -> void:
 	_save_state()
 
 
+func _under_prefix(key: String) -> bool:
+	for p in sync_prefixes():
+		if key.begins_with(p):
+			return true
+	return false
+
+
 func _on_store_changed(key: String) -> void:
 	if _importing:
 		return
-	for p in sync_prefixes():
-		if key.begins_with(p):
-			mark_dirty()
-			return
+	if is_synced_key(key):
+		mark_dirty()
 
 
 func _on_debounce() -> void:
@@ -435,6 +521,10 @@ func _load_state() -> void:
 
 
 func _save_state() -> void:
+	# Offline / test runs write nothing under user:// (kept in memory instead).
+	if _config == null or _config.is_offline():
+		return
+	SnapKitConfig.ensure_dir_for(state_path)
 	var f := FileAccess.open(state_path, FileAccess.WRITE)
 	if f == null:
 		return

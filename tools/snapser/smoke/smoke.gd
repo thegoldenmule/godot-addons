@@ -5,7 +5,7 @@ extends SceneTree
 ## snapser_kit.config.json>:
 ##
 ##   godot --headless --path <godot-addons> --script res://tools/snapser/smoke/smoke.gd \
-##       -- --config=/abs/path/game/snapser_kit.config.json [--stat=<declared key>]
+##       -- --config=/abs/path/game/snapser_kit.config.json [--session-file=<path>] [--stat=<declared key>]
 ##          [--board=<logical>] [--verbose]
 ##
 ## Safety:
@@ -13,9 +13,12 @@ extends SceneTree
 ##     which ignores SNAPSER_GATEWAY_URL and the debug override). If
 ##     SNAPSER_GATEWAY_URL is set to anything else, the run refuses.
 ##   - It refuses non-https gateways and configs without game_id.
-##   - It uses its own persisted smoke user per game
-##     (user://snapkit_smoke_<game_id>.json in the godot-addons project), so
-##     repeated runs do not mint new anonymous users. No API key is involved.
+##   - It uses its own persisted smoke user per game, so repeated runs do not
+##     mint new anonymous users: --session-file=<path> (absolute path or
+##     user://…) names it explicitly — use this under an isolated HOME, where
+##     user:// moves — else user://snapkit_smoke_<game_id>.json in the
+##     godot-addons project. The user id and every board written are printed at
+##     the end. No API key is involved.
 ##
 ## Steps (each PASS / FAIL / SKIP). SKIP = the client returned
 ## "not_implemented" (kit-clients not merged yet) or the config lacks what the
@@ -24,6 +27,8 @@ extends SceneTree
 const WATCHDOG_S := 180.0
 
 var _results: Array = []   # [name, status, detail]
+var _user_id := ""
+var _boards_written: PackedStringArray = PackedStringArray()
 var _verbose := false
 
 
@@ -73,14 +78,21 @@ func _run() -> void:
 	svc.save_store = store
 	root.add_child(svc)
 	svc.start_with_config(cfg)
-	svc.auth.session_path = "user://snapkit_smoke_%s.json" % cfg.game_id
-	# Fresh cloud-save bookkeeping each run: the first sync merges the in-memory
-	# store with whatever earlier runs left in the blob.
-	svc.cloud_save.state_path = "user://snapkit_smoke_%s_cloud_%d.json" % [cfg.game_id, randi()]
+	var session_file := str(args.get("session-file", "user://snapkit_smoke_%s.json" % cfg.game_id))
+	svc.auth.session_path = session_file
+	print("SMOKE: session file %s (%s)" % [session_file,
+		"existing identity" if FileAccess.file_exists(session_file) else "NEW identity will be created"])
+	# Fresh cloud-save bookkeeping each run (removed first): the first sync merges
+	# the in-memory store with whatever earlier runs left in the blob.
+	var cloud_state := session_file.get_basename() + ".cloud.json"
+	if FileAccess.file_exists(cloud_state):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(cloud_state))
+	svc.cloud_save.state_path = cloud_state
 	await svc.boot_finished
 
 	# --- core ------------------------------------------------------------------
 	var uid := svc.user_id()
+	_user_id = uid
 	_record("auth.anon_login", "PASS" if svc.is_online() and uid != "" else "FAIL",
 		"user %s, handle %s" % [uid, svc.auth.username()])
 	if not svc.is_online():
@@ -132,7 +144,10 @@ func _run() -> void:
 	if board == "":
 		_record("leaderboards.*", "SKIP", "no board in config (pass --board=)")
 	else:
-		_check("leaderboards.submit", await svc.submit_score(board, randi_range(1, 1000)),
+		var sub := await svc.submit_score(board, randi_range(1, 1000))
+		if sub.get("ok", false):
+			_boards_written.append(cfg.leaderboard_id(board))
+		_check("leaderboards.submit", sub,
 			func(_r: Dictionary) -> String: return "board %s -> %s" % [board, cfg.leaderboard_id(board)])
 		_check("leaderboards.top", await svc.top_scores(board, 5),
 			func(r: Dictionary) -> String: return _describe_entries(r))
@@ -246,5 +261,8 @@ func _finish() -> void:
 	var counts := {"PASS": 0, "FAIL": 0, "SKIP": 0}
 	for r in _results:
 		counts[r[1]] += 1
+	print("SMOKE: user %s; board rows written/updated: %s" % [
+		_user_id if _user_id != "" else "(none)",
+		", ".join(_boards_written) if not _boards_written.is_empty() else "none"])
 	print("SMOKE: %d passed, %d failed, %d skipped" % [counts.PASS, counts.FAIL, counts.SKIP])
 	quit(0 if counts.FAIL == 0 else 1)

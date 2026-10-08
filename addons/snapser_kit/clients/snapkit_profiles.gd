@@ -14,10 +14,9 @@ extends RefCounted
 ## wipes other attributes, falling back to a PUT upsert when the user has no
 ## profile yet (404).
 ##
-## Moderation (identity spike §6): the Profiles snap enforces UNIQUENESS only
-## (when display_name is marked Unique on the snapend; a collision is HTTP 409,
-## code 14012, surfaced here as error "name_taken"). There is no server-side
-## filter, so the client does:
+## Names are NOT unique (D33): several players may share a display name, and
+## leaderboards tell them apart by user id. There is no server-side filter
+## (identity spike §6), so the client does:
 ##   - sanitize_display_name(): strip control / zero-width chars, collapse
 ##     whitespace, trim, clamp to NAME_MAX_LEN;
 ##   - is_valid_display_name(): NAME_MIN_LEN..NAME_MAX_LEN, no markup-ish
@@ -48,8 +47,6 @@ const BATCH_PATH := "/v1/profiles/batch/profiles"
 ## User ids per BatchGetProfiles request (keeps the query string short).
 const BATCH_MAX := 50
 const DEFAULT_NAME_PREFIX := "Player"
-## Uniqueness violation (HTTP 409 / Snapser 14012).
-const ERR_NAME_TAKEN := "name_taken"
 ## Characters never allowed in a display name.
 const DISALLOWED_CHARS := "<>{}[]\\|`\"^~"
 
@@ -182,11 +179,6 @@ static func default_display_name(seed: String) -> String:
 	return "%s %s" % [DEFAULT_NAME_PREFIX, seed.sha256_text().substr(0, 4).to_upper()]
 
 
-## True when a write failed because the name is already used (HTTP 409).
-static func is_name_taken(res: Dictionary) -> bool:
-	return int(res.get("status", 0)) == 409
-
-
 ## Full name check used by set_display_name: static rules + name_filter.
 func accepts_display_name(display_name: String) -> bool:
 	if not is_valid_display_name(display_name):
@@ -203,6 +195,7 @@ func fetch_profile() -> Dictionary:
 	if int(res.status) == 404:
 		res.ok = true
 		res.error = ""
+		res.snap_code = 0
 	var profile := parse_profile(res.json) if res.ok else {}
 	res["profile"] = profile
 	res["display_name"] = SnapKitJson.get_str(profile, ATTR_DISPLAY_NAME)
@@ -211,8 +204,8 @@ func fetch_profile() -> Dictionary:
 	return res
 
 
-## Sanitize, validate, then store. Invalid names -> ERR_INVALID_ARGUMENT with no
-## request; a uniqueness collision -> ERR_NAME_TAKEN.
+## Sanitize (trim, length-limit), validate (filter), then store. Invalid names
+## -> ERR_INVALID_ARGUMENT with no request. Names are not unique (D33).
 ## -> {..., display_name:String (as stored; "" on failure)}
 func set_display_name(display_name: String) -> Dictionary:
 	var clean := sanitize_display_name(display_name)
@@ -224,8 +217,6 @@ func set_display_name(display_name: String) -> Dictionary:
 	var res: Dictionary = await _transport.request(HTTPClient.METHOD_PATCH, profile_path(), body)
 	if int(res.status) == 404:
 		res = await _transport.request(HTTPClient.METHOD_PUT, profile_path(), body)
-	if not res.ok and is_name_taken(res):
-		res.error = ERR_NAME_TAKEN
 	var stored := SnapKitJson.get_str(parse_profile(res.json), ATTR_DISPLAY_NAME, clean)
 	res["display_name"] = stored if res.ok else ""
 	if res.ok and _transport.user_id() != "":

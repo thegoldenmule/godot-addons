@@ -10,7 +10,7 @@ extends EditorPlugin
 ##     boards, cloud-save keys, link providers) to the Output panel.
 ##   - "Snapser Kit: Test connection" resolves the config and performs an
 ##     anonymous login against the configured gateway, reporting the result and
-##     latency. It uses its own session file (PROBE_SESSION_PATH), so it never
+##     latency. It uses its own session file (PROBE_SESSION_FILE under SnapKitConfig.data_root), so it never
 ##     touches the game's player session, and never reads or sends an API key.
 ##
 ## Self-update is NOT handled here: editor_tool_kit manages this addon through
@@ -22,7 +22,7 @@ const TransportScript := preload("res://addons/snapser_kit/core/snapkit_transpor
 
 const TOOL_MENU_TEST := "Snapser Kit: Test connection"
 const TOOL_MENU_SHOW := "Snapser Kit: Show resolved config"
-const PROBE_SESSION_PATH := "user://snapser_kit_editor_probe.json"
+const PROBE_SESSION_FILE := "snapser_kit_editor_probe.json"
 
 var _testing := false
 
@@ -44,7 +44,7 @@ func _on_show_config() -> void:
 	print("[SnapKit] %s" % cfg.describe())
 	print("[SnapKit]   game_id=%s  handle_prefix=%s" % [cfg.game_id, cfg.handle_prefix()])
 	print("[SnapKit]   leaderboards=%s" % JSON.stringify(cfg.leaderboards))
-	print("[SnapKit]   cloud_save: blob_key=%s sync_prefixes=%s" % [cfg.cloud_save_blob_key(), cfg.cloud_save_prefixes()])
+	print("[SnapKit]   cloud_save: blob_key=%s sync_prefixes=%s sync_keys=%s" % [cfg.cloud_save_blob_key(), cfg.cloud_save_prefixes(), cfg.cloud_save_keys()])
 	print("[SnapKit]   link_providers=%s  quests=%s" % [cfg.link_providers, cfg.quests_enabled()])
 
 
@@ -61,7 +61,7 @@ func _on_test_connection() -> void:
 	var auth: SnapKitAuth = AuthScript.new()
 	add_child(transport)
 	add_child(auth)
-	auth.session_path = PROBE_SESSION_PATH
+	auth.session_path = SnapKitConfig.data_path(PROBE_SESSION_FILE)
 	transport.setup(cfg, auth)
 	auth.setup(cfg, transport)
 	print("[SnapKit] Test connection: anonymous login via %s ..." % cfg.gateway_url)

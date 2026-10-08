@@ -60,6 +60,8 @@ signal session_changed(uid: String)
 ## Internal: single-flight login completion.
 signal _login_finished(ok: bool)
 
+const SESSION_FILE := "snapser_session.json"
+## Default location when SnapKitConfig.data_root is user:// (kept for reference).
 const SESSION_PATH := "user://snapser_session.json"
 const EXPIRY_MARGIN_S := 60
 const DEFAULT_TTL_S := 3600
@@ -76,8 +78,9 @@ const ERR_UNSUPPORTED_PROVIDER := "unsupported_provider"
 var user_id: String = ""
 ## Current session token ("" before login). Never log this.
 var session_token: String = ""
-## Where the session is persisted. Tests point this at a temp file.
-var session_path: String = SESSION_PATH
+## Where the session is persisted: SnapKitConfig.data_root / SESSION_FILE,
+## resolved when this object is created. Tools may point it elsewhere.
+var session_path: String = SnapKitConfig.data_path(SESSION_FILE)
 
 var _config: SnapKitConfig
 var _transport: SnapKitTransport
@@ -379,6 +382,7 @@ func _ensure_loaded() -> void:
 
 
 func _save() -> void:
+	SnapKitConfig.ensure_dir_for(session_path)
 	var f := FileAccess.open(session_path, FileAccess.WRITE)
 	if f == null:
 		push_warning("[SnapKit] cannot write session file %s" % session_path)
