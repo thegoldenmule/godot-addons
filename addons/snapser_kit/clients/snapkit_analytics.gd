@@ -5,7 +5,7 @@ extends Node
 ## (analytics.swagger3.json), D19.
 ##
 ##   PUT /v1/analytics/batch/user-events   BatchCreateUserEvents
-##       {user_id, data:[{event, id:int64, created_at:int64 (unix s),
+##       {user_id, data:[{event, id:uint32 (1-based order in the batch), created_at:int64 (unix s),
 ##                        properties:{name: String}}]}
 ##       -> {events_ingested, events_failed, responses:[...]}
 ##
@@ -188,7 +188,10 @@ static func batch_body(events: Array, user_id: String = "") -> Dictionary:
 			props[str(k)] = prop_to_string(raw[k])
 		data.append({
 			"event": str(e.get("event", "")),
-			"id": int(e.get("id", 0)),
+			# Ingestion order within this batch. The live snap parses `id` as
+			# uint32 (the swagger says int64), so never send the queue's
+			# millisecond-seeded id.
+			"id": data.size() + 1,
 			"created_at": int(e.get("created_at", 0)),
 			"properties": props,
 		})

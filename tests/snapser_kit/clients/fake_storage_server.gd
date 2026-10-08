@@ -6,7 +6,9 @@ extends RefCounted
 ##   POST .../json-blobs/{key}  -> 200 {cas} | 409 (5006, exists)
 ##   PUT  .../json-blobs/{key}  {value, cas?, create?} -> 200 {cas}
 ##        | 400 (5007, CAS mismatch) | 404 (missing and create not set)
-##   GET  .../cas/{key}         -> 200 {cas} | 404
+##   GET  .../cas/{key}         -> 400 (5001): the /cas/ route is for plain blobs;
+##                                 live Snapser rejects it for JSON blobs.
+## Error bodies use "api_error_code", as the live gateway does.
 ## Several FakeTransports (devices) may share one server. Values are stored as
 ## JSON text, as on the wire.
 
@@ -56,15 +58,13 @@ func _fail() -> Variant:
 func _get_blob(req: Dictionary) -> Dictionary:
 	var b: Variant = blobs.get(_id(req))
 	if b == null:
-		return {"status": 404, "json": {"error_code": 5000, "message": "Key not found"}}
+		return {"status": 404, "json": {"api_error_code": 5000, "message": "Key not found"}}
 	return {"status": 200, "json": {"value": SnapKitJson.parse(b.text), "cas": b.cas}}
 
 
-func _get_cas(req: Dictionary) -> Dictionary:
-	var b: Variant = blobs.get(_id(req))
-	if b == null:
-		return {"status": 404, "json": {"error_code": 5000}}
-	return {"status": 200, "json": {"cas": b.cas}}
+func _get_cas(_req: Dictionary) -> Dictionary:
+	return {"status": 400, "json": {"api_error_code": 5001,
+		"message": "Storage type for key does not match"}}
 
 
 func _insert_blob(req: Dictionary) -> Dictionary:
@@ -72,7 +72,7 @@ func _insert_blob(req: Dictionary) -> Dictionary:
 	if f != null:
 		return f
 	if blobs.has(_id(req)):
-		return {"status": 409, "json": {"error_code": 5006, "message": "Document already exists"}}
+		return {"status": 409, "json": {"api_error_code": 5006, "message": "Document already exists"}}
 	var c := _next_cas()
 	blobs[_id(req)] = {"text": JSON.stringify(req.body.value), "cas": c}
 	return {"status": 200, "json": {"cas": c}}
@@ -85,9 +85,9 @@ func _replace_blob(req: Dictionary) -> Dictionary:
 	var b: Variant = blobs.get(_id(req))
 	var body: Dictionary = req.body
 	if b == null and not bool(body.get("create", false)):
-		return {"status": 404, "json": {"error_code": 5000}}
+		return {"status": 404, "json": {"api_error_code": 5000}}
 	if b != null and body.has("cas") and str(body.cas) != str(b.cas):
-		return {"status": 400, "json": {"error_code": 5007, "message": "CAS mismatch"}}
+		return {"status": 400, "json": {"api_error_code": 5007, "message": "CAS mismatch"}}
 	var c := _next_cas()
 	blobs[_id(req)] = {"text": JSON.stringify(body.value), "cas": c}
 	return {"status": 200, "json": {"cas": c}}

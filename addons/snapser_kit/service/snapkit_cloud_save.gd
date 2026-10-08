@@ -357,8 +357,20 @@ func _import_local(data: Dictionary) -> void:
 		for k in data:
 			if str(k).begins_with(p):
 				part[k] = data[k]
-		_store.call("import_prefix", p, part, true)
+		# Agent D's SaveService takes an optional third `replace` arg (drop local
+		# keys missing from `part`); the duck-typed contract only promises
+		# (prefix, data), so pass `replace` only when the store accepts it.
+		if _import_arity() >= 3:
+			_store.call("import_prefix", p, part, true)
+		else:
+			_store.call("import_prefix", p, part)
 	_importing = false
+
+
+func _import_arity() -> int:
+	if _store == null or not _store.has_method("import_prefix"):
+		return 0
+	return _store.get_method_argument_count("import_prefix")
 
 
 func _record_sync(cas: String, content_hash: String, version: int) -> void:

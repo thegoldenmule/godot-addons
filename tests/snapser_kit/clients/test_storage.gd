@@ -66,7 +66,28 @@ func test_cas_conflicts_detected() -> void:
 	r = await st.put_json_blob_cas("k", {"v": 1}, "stale")
 	check(not r.ok and r.conflict, "stale cas -> conflict")
 	check_eq(r.error, "http_400", "http error kept")
-	check_eq(t.calls_to("/v1/storage/owner/user-1/private/cas/").size(), 2, "probed with GetCas")
+	check(r.remote_cas != "", "remote cas read back")
+	check_eq(t.calls_to("/v1/storage/owner/user-1/private/cas/").size(), 0,
+		"never uses the plain-blob /cas/ route (live: 400 5001 on JSON blobs)")
+
+
+func test_live_cas_mismatch_body_is_a_conflict() -> void:
+	# Exactly what the live gateway answered to a stale CAS on 2026-10-08, with the
+	# re-read also failing: still a conflict.
+	t.respond(HTTPClient.METHOD_PUT, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 400,
+		{"api_error_code": 5007, "details": null, "message": "CAS mismatch"})
+	t.respond(HTTPClient.METHOD_GET, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 500)
+	var r: Dictionary = await st.put_json_blob_cas("k", {"v": 1}, "old")
+	check(not r.ok, "not ok")
+	check(r.conflict, "5007 -> conflict")
+	check_eq(SnapKitStorage.snap_error_code(r.json), 5007, "api_error_code parsed")
+
+
+func test_get_cas_reads_json_blob() -> void:
+	server.put_raw("user-1", "k", {"v": 0})
+	var c: Dictionary = await st.get_cas("k")
+	check(c.ok and c.cas != "", "cas from GET json-blobs")
+	check_eq(t.calls_to("/v1/storage/owner/user-1/private/cas/").size(), 0, "no /cas/ route")
 
 
 func test_non_conflict_errors() -> void:
@@ -76,7 +97,7 @@ func test_non_conflict_errors() -> void:
 	check_eq(r.conflict, false, "403 is not a conflict")
 	check_eq(t.calls_to("/v1/storage/owner/user-1/private/cas/").size(), 0, "no probe on 403")
 	t.respond(HTTPClient.METHOD_PUT, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 400)
-	t.respond(HTTPClient.METHOD_GET, "/v1/storage/owner/{o}/{a}/cas/{k}", 200, {"cas": "5"})
+	t.respond(HTTPClient.METHOD_GET, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 200, {"value": {}, "cas": "5"})
 	r = await st.put_json_blob_cas("k", {"v": 1}, "5")
 	check_eq(r.conflict, false, "400 with unchanged server cas is not a conflict")
 
