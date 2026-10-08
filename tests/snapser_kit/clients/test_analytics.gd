@@ -44,7 +44,7 @@ func test_batch_body_shape() -> void:
 	], "user-9")
 	check_eq(body.user_id, "user-9", "user_id in body")
 	check_eq(body.data[0].event, "run_end", "event")
-	check_eq(body.data[0].id, 7, "id")
+	check_eq(body.data[0].id, 1, "id = 1-based order in the batch (not the queue id)")
 	check_eq(body.data[0].created_at, 1760000000, "created_at")
 	check_eq(body.data[0].properties,
 		{"score": "120", "ratio": "0.5", "whole": "3", "won": "1", "mode": "story", "n": ""},
@@ -166,3 +166,17 @@ func test_interval_flush_and_inflight_guard() -> void:
 	await _settle()
 	await _settle()
 	check_eq(an2.pending_count(), 0, "first flush finished")
+
+
+func test_batch_ids_fit_uint32() -> void:
+	# Live: the snap parses `id` as uint32; a millisecond-seeded id was rejected
+	# with 400 "invalid value for uint32 type".
+	var events := []
+	for i in 5:
+		events.append({"event": "screen_view", "id": 1791493544434 + i, "created_at": 1, "properties": {}})
+	var body := SnapKitAnalytics.batch_body(events, "u")
+	var ids := []
+	for e in body.data:
+		ids.append(e.id)
+		check(e.id > 0 and e.id < 4294967296, "id %d fits uint32" % e.id)
+	check_eq(ids, [1, 2, 3, 4, 5], "ingestion order preserved")

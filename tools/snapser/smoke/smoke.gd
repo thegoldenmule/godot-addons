@@ -116,8 +116,13 @@ func _run() -> void:
 	# Display name first, so the board read below can show it.
 	# Random suffix: repeat runs must not trip a unique-name constraint.
 	var smoke_name := "Smoke Tester %s" % Crypto.new().generate_random_bytes(2).hex_encode()
-	_check("profiles.set_display_name", await svc.set_display_name(smoke_name),
+	var set_res := await svc.set_display_name(smoke_name)
+	_check("profiles.set_display_name", set_res,
 		func(r: Dictionary) -> String: return "stored '%s'" % r.get("display_name", ""))
+	# The kit clamps names (SnapKitProfiles.NAME_MAX_LEN), so compare boards
+	# against what was actually stored.
+	if set_res.get("ok", false):
+		smoke_name = str(set_res.get("display_name", smoke_name))
 	_check("profiles.fetch", await svc.refresh_profile(),
 		func(_r: Dictionary) -> String: return "display_name() = '%s'" % svc.display_name())
 

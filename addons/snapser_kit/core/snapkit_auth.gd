@@ -220,8 +220,13 @@ func adopt_session(session: Dictionary) -> bool:
 func refresh_session() -> bool:
 	if _offline() or session_token == "":
 		return false
+	# The gateway wants the session headers on refresh too (without them: 400
+	# api_error_code 10 "Session token not found"). Send them explicitly rather
+	# than with auth:true, which would re-enter ensure_session() -> the
+	# single-flight login that may be calling us.
 	var res := await _transport.request(HTTPClient.METHOD_PATCH, PATH_REFRESH,
-		{"session_token": session_token}, {"auth": false, "no_retry": true})
+		{"session_token": session_token},
+		{"auth": false, "no_retry": true, "headers": auth_headers()})
 	var parsed := parse_login_response(res.json)
 	if not res.ok or not parsed.ok:
 		return false

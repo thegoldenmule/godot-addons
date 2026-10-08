@@ -347,3 +347,35 @@ func test_state_persists_device_id_and_cas() -> void:
 	check_eq(again.device_id(), dev, "device id persisted")
 	var r: Dictionary = await again.pull()
 	check_eq(r.applied, SnapKitCloudSave.APPLIED_NONE, "restored CAS + hash: nothing to do")
+
+
+## A store with exactly the amendment-6 surface: import_prefix(prefix, data),
+## no optional `replace` argument (the live smoke store crashed the kit here).
+class StrictStore extends RefCounted:
+	signal changed(key: String)
+	var data := {}
+	func keys_with_prefix(prefix: String) -> PackedStringArray:
+		return PackedStringArray(data.keys().filter(func(k: String) -> bool: return k.begins_with(prefix)))
+	func export_prefix(prefix: String) -> Dictionary:
+		var out := {}
+		for k in data:
+			if str(k).begins_with(prefix):
+				out[k] = data[k]
+		return out
+	func import_prefix(_prefix: String, incoming: Dictionary) -> void:
+		for k in incoming:
+			data[k] = incoming[k]
+			changed.emit(k)
+
+
+func test_two_arg_import_prefix_store_is_supported() -> void:
+	server.put_raw("user-1", "save_v1",
+		SnapKitCloudSave.make_envelope({"prog_remote": 9}, 2, "other", 100))
+	var store := StrictStore.new()
+	store.data["prog_local"] = 1
+	var cs := _device(store)
+	var r: Dictionary = await cs.pull()
+	check(r.ok, "pull ok")
+	check_eq(r.applied, SnapKitCloudSave.APPLIED_MERGED, "merged")
+	check_eq(store.data.get("prog_remote"), 9, "remote key imported through 2-arg import_prefix")
+	check_eq(store.data.get("prog_local"), 1, "local key kept")

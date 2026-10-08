@@ -16,10 +16,15 @@ extends RefCounted
 ##
 ## Optimistic concurrency (put_json_blob_cas): with a CAS token the write is a
 ## PUT {value, cas}; with "" it is a POST insert, which fails if the blob exists.
-## The swagger does not document which status a CAS mismatch returns, so any
-## rejected write (4xx other than 401/403/429) is double-checked with GetCas:
-## if the server's token differs from the one we sent, the result carries
-## conflict:true (and remote_cas) instead of a silent overwrite.
+## Live behaviour (verified on a dev snapend, 2026-10-08): a stale CAS is
+## HTTP 400 {"api_error_code": 5007, "message": "CAS mismatch"}, and that is
+## reported as conflict:true directly. Any other rejected write (4xx other than
+## 401/403/429) is double-checked by re-reading the blob's CAS: if it differs
+## from the one we sent, the result carries conflict:true (and remote_cas)
+## instead of a silent overwrite.
+## The GetCas route (/cas/{key}) is for plain blobs only; on a JSON blob it
+## answers 400 5001 "Storage type for key does not match", so get_cas() reads
+## the token from GET json-blobs/{key} instead.
 ##
 ## Conventions: see SnapKitStats.
 
@@ -27,6 +32,8 @@ const ACCESS_PRIVATE := "private"
 const ACCESS_PROTECTED := "protected"
 const ACCESS_PUBLIC := "public"
 const BASE_PATH := "/v1/storage/owner/{user_id}"
+## Snapser storage api_error_code for a CAS mismatch.
+const SNAP_ERR_CAS_MISMATCH := 5007
 
 var _transport: SnapKitTransport
 
@@ -97,12 +104,19 @@ func put_json_blob(key: String, value: Variant, access: String = ACCESS_PRIVATE)
 func get_cas(key: String, access: String = ACCESS_PRIVATE) -> Dictionary:
 	if key == "":
 		return _invalid({"cas": "", "exists": false})
-	var res: Dictionary = await _transport.request(HTTPClient.METHOD_GET, cas_path(key, access))
-	if int(res.status) == 404:
-		return _missing(res, {"cas": "", "exists": false})
-	res["cas"] = SnapKitJson.get_str(res.json, "cas") if res.ok else ""
-	res["exists"] = bool(res.ok)
+	# JSON blobs: the CAS rides on GetJsonBlob (the /cas/ route is plain-blob only).
+	var res: Dictionary = await get_json_blob(key, access)
+	res.erase("value")
 	return res
+
+
+## Snapser's numeric api_error_code from an error body (0 if absent).
+static func snap_error_code(json: Variant) -> int:
+	if json is Dictionary:
+		if (json as Dictionary).has("api_error_code"):
+			return SnapKitJson.get_int(json, "api_error_code")
+		return SnapKitJson.get_int(json, "error_code")
+	return 0
 
 
 ## Replace only if the server CAS still equals `cas` ("" = blob must not exist).
@@ -122,8 +136,13 @@ func put_json_blob_cas(key: String, value: Variant, cas: String,
 	res["remote_cas"] = ""
 	if res.ok or not is_possible_conflict(int(res.status)):
 		return res
+	var mismatch := snap_error_code(res.json) == SNAP_ERR_CAS_MISMATCH
 	# Rejected: is the server's blob actually different from what we last saw?
 	var probe: Dictionary = await get_cas(key, access)
+	if mismatch:
+		res["conflict"] = true
+		res["remote_cas"] = str(probe.get("cas", "")) if probe.get("ok", false) else ""
+		return res
 	if probe.ok:
 		var remote_cas: String = probe.cas
 		res["conflict"] = remote_cas != cas

@@ -20,8 +20,9 @@ extends RefCounted
 ##     snapend apply), to exercise 401 -> reauth -> retry.
 ##   - fail_next(count, kind): the next `count` requests (any route) fail with
 ##     kind "timeout" | "network" | "http_<status>" (e.g. "http_500").
-##   - PATCH /v1/auth/refresh {session_token}: a still-valid token is swapped
-##     for a new one (same user); an invalid one gets 401.
+##   - PATCH /v1/auth/refresh {session_token} (+ Token header, required as on
+##     the live gateway): a still-valid token is swapped for a new one (same
+##     user); an invalid one gets 401, a missing header 400.
 ##   - Paths under /v1/auth/login/ and /v1/auth/refresh never require a session.
 ##   - Custom routes are matched before the built-in anon login, so a test can
 ##     override it.
@@ -187,6 +188,9 @@ func _anon_login(req: Dictionary) -> Dictionary:
 
 
 func _refresh(req: Dictionary) -> Dictionary:
+	# As live: the Token header is required (400 code 10 without it).
+	if str(req.headers.get("token", "")) == "":
+		return {"status": 400, "json": {"api_error_code": 10, "message": "Session token not found"}}
 	var old := SnapKitJson.get_str(req.body, "session_token")
 	if not _sessions.has(old):
 		return {"status": 401, "json": {"message": "invalid session"}}

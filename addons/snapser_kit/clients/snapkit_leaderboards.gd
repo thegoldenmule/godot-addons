@@ -162,10 +162,11 @@ func _fetch(board: String, range_kind: String, count: int) -> Dictionary:
 	return res
 
 
-## Snapser error code from an error body ({"error_code": n} / {"code": n}); 0
+## Snapser error code from an error body ({"api_error_code": n} as sent live,
+## or {"error_code": n} / {"code": n}); 0
 ## when absent.
 static func _snap_error_code(json: Variant) -> int:
-	for k in ["error_code", "code"]:
+	for k in ["api_error_code", "error_code", "code"]:
 		var v := SnapKitJson.get_int(json, k, 0)
 		if v != 0:
 			return v
