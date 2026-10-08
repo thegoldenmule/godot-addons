@@ -121,4 +121,8 @@ SNAPSER_OFFLINE=1 godot --headless --path . --script res://tests/snapser_kit/run
 
 - Tests live in `tests/snapser_kit/` in the godot-addons repo.
 - They use `SnapKitMockGateway`, an in-process fake gateway with anonymous login and refresh, 401 simulation and failure injection. They never touch the network.
+- **Files go in a sandbox:** every file the kit writes (session, cloud-save state, editor probe) lives under `SnapKitConfig.data_root`, which defaults to `user://`.
+  - The test runner, and any `SnapKitMockGateway` you construct, move it to a scratch directory, so tests never touch a player's real files.
+  - The runner fails the suite if anything under `user://` changes.
+  - A game's own suites can do the same by calling `SnapKitMockGateway.use_scratch_data_root()` before starting the service.
 - Live smoke tests and provisioning are covered in `tools/snapser/RUNBOOK.md`.

@@ -41,6 +41,11 @@ extends RefCounted
 ## Transport-facing entry point: handle(). The transport honours `latency_s`
 ## with a SceneTree timer before calling it.
 
+## Sandbox: constructing a mock gateway moves SnapKitConfig.data_root to a
+## scratch directory (use_scratch_data_root) when it is still the default
+## user://, so kit objects created afterwards never write the player's real
+## session / cloud-save files. Set the root yourself first to choose another.
+
 ## Enforce Token / User-Id on non-login routes.
 var require_auth: bool = true
 ## Simulated latency per request (seconds); 0 = immediate.
@@ -59,6 +64,18 @@ var _fail_queue: Array = []      # pending failure kinds
 var _sessions: Dictionary = {}   # session token -> user id
 var _users: Dictionary = {}      # anon username -> user id
 var _next_id: int = 1
+
+
+func _init() -> void:
+	use_scratch_data_root()
+
+
+## Point SnapKitConfig.data_root at a per-process scratch dir under the OS temp
+## dir, unless something already moved it off user://. Returns the root.
+static func use_scratch_data_root() -> String:
+	if SnapKitConfig.data_root == "user://":
+		SnapKitConfig.data_root = OS.get_temp_dir().path_join("snapkit_sandbox_%d" % OS.get_process_id())
+	return SnapKitConfig.data_root
 
 
 ## Register a handler. path_pattern may contain {name} segments, matched against

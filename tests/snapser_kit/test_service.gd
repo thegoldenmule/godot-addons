@@ -399,3 +399,36 @@ func test_offline_and_test_runs_write_nothing_under_user() -> void:
 		svc.notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
 		await tree.process_frame
 	check_eq(_user_files(), before, "no file created or modified under user://")
+
+
+## Mock-ONLINE service runs with the DEFAULT session / cloud-save paths (no
+## per-test redirection): login, stats, cloud-save sync and analytics must all
+## leave user:// untouched — kit files belong under SnapKitConfig.data_root,
+## which the test harness points at a scratch dir. (On 0e17f8a this wrote
+## user://snapser_session.json and user://snapser_kit_cloud_save.json.)
+func test_mock_online_runs_write_nothing_under_user() -> void:
+	await tree.process_frame
+	var before := _user_files()
+	for round_i in 2:   # second round reloads the files the first one wrote
+		var mock := SnapKitMockGateway.new()
+		mock.respond(PUT, "/v1/statistics/user-stats/{u}/{k}", 200, {"value": "1"})
+		mock.respond(HTTPClient.METHOD_GET, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 404,
+			{"api_error_code": 5000})
+		mock.respond(HTTPClient.METHOD_POST, "/v1/storage/owner/{o}/{a}/json-blobs/{k}", 200, {"cas": "c1"})
+		mock.respond(PUT, "/v1/analytics/batch/user-events", 200, {"events_ingested": 1, "events_failed": 0})
+		var svc := SnapKitService.new()   # DEFAULT paths on purpose
+		var store := MemStore.new()
+		store.data["prog_level"] = round_i + 1
+		svc.save_store = store
+		add_node(svc)
+		svc.start_with_config(mock_config({"cloud_save": {"blob_key": "save_v1", "sync_prefixes": ["prog_"]}}))
+		svc.use_mock_gateway(track_mock(mock))
+		check(await svc.wait_until_ready(), "online via mock (round %d)" % round_i)
+		await svc.record_stat("x", 1)
+		store.set_value("prog_level", 9)
+		await svc.cloud_save_push()
+		svc.track("run_end", {"mode": "m"})
+		await svc.analytics_client.flush()
+		svc.notification(Node.NOTIFICATION_APPLICATION_PAUSED)
+		await tree.process_frame
+	check_eq(_user_files(), before, "mock-online runs created/modified nothing under user://")

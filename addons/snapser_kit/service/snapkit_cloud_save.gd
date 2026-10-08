@@ -61,7 +61,7 @@ extends Node
 ##     arrays take union, anything
 ##     else takes the newer side's value (by updated_at vs the last local change).
 ##   - Sync bookkeeping (last CAS, revision, synced hash, last local change,
-##     device id) persists at state_path (STATE_PATH).
+##     device id) persists at state_path (STATE_FILE under SnapKitConfig.data_root).
 ##   - Offline: pull()/push() return the transport's {ok:false, error:"offline"};
 ##     local play is unaffected and the next pause / change retries.
 ##
@@ -82,6 +82,8 @@ signal _idle
 
 const DEBOUNCE_S := 10.0
 const BLOB_FORMAT_VERSION := 1
+const STATE_FILE := "snapser_kit_cloud_save.json"
+## Default location when SnapKitConfig.data_root is user:// (kept for reference).
 const STATE_PATH := "user://snapser_kit_cloud_save.json"
 const DEFAULT_BLOB_KEY := "save_v1"
 const ENCODING := "godot_native"
@@ -99,7 +101,7 @@ var merge_func: Callable
 ## Seconds of quiet after the last local change before an automatic push.
 var debounce_s: float = DEBOUNCE_S
 ## Where sync bookkeeping persists (tests point it at a scratch file).
-var state_path: String = STATE_PATH
+var state_path: String = SnapKitConfig.data_path(STATE_FILE)
 ## Storage access type of the blob.
 var access: String = SnapKitStorage.ACCESS_PRIVATE
 ## Set just before merge_func is called: true when the remote blob's updated_at
@@ -522,6 +524,7 @@ func _save_state() -> void:
 	# Offline / test runs write nothing under user:// (kept in memory instead).
 	if _config == null or _config.is_offline():
 		return
+	SnapKitConfig.ensure_dir_for(state_path)
 	var f := FileAccess.open(state_path, FileAccess.WRITE)
 	if f == null:
 		return

@@ -79,6 +79,14 @@ var cloud_save: Dictionary = {}
 var link_providers: PackedStringArray = PackedStringArray()
 ## The whole parsed committed file, including keys this class does not model.
 var raw: Dictionary = {}
+## Root directory for EVERY file the kit writes (session file, cloud-save state,
+## editor probe): one sandbox switch. Default "user://" (the game's normal data
+## dir — real games never change it). Test harnesses point it at a scratch dir
+## (tests/snapser_kit/run_tests.gd does; constructing a SnapKitMockGateway does
+## too when it is still the default), so test runs never touch the real files.
+## Read when a kit object is created, so set it before start().
+static var data_root: String = "user://"
+
 ## kind ("stats"|"boards"|"events"|"blobs") -> PackedStringArray, only for the
 ## kinds present in the committed "declared" section.
 var declared: Dictionary = {}
@@ -177,6 +185,19 @@ static func resolve(committed: Dictionary, env: Dictionary, args: PackedStringAr
 ## offline = gateway_url is empty or invalid.
 static func from_dict(d: Dictionary) -> SnapKitConfig:
 	return resolve(d, {}, PackedStringArray(), {}, false)
+
+
+## A kit-owned file path under data_root.
+static func data_path(file_name: String) -> String:
+	return data_root.path_join(file_name)
+
+
+## Make sure the directory holding `path` exists (data_root may be a scratch
+## dir that does not exist yet). Never needed for plain user:// paths.
+static func ensure_dir_for(path: String) -> void:
+	var dir := path.get_base_dir()
+	if dir != "" and dir != "user://" and not DirAccess.dir_exists_absolute(dir):
+		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
 
 
 ## Switch this config offline (idempotent). Returns self for chaining:

@@ -18,6 +18,15 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	# Sandbox every kit-owned file (session, cloud-save state) in a scratch dir,
+	# and prove at the end that the suite changed nothing under user://.
+	var sandbox := SnapKitMockGateway.use_scratch_data_root()
+	print("kit data_root (sandbox): %s" % sandbox)
+	var user_before := user_files()
+	# The scan above is one long synchronous frame; let the frame delta settle
+	# so the first test's timers don't fire early.
+	for i in 3:
+		await process_frame
 	var filter := ""
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--filter="):
@@ -56,8 +65,56 @@ func _run() -> void:
 					print("         - %s" % f)
 
 	await process_frame   # let queue_free()d test nodes go before exit
+	var leaked := diff_files(user_before, user_files())
+	if not leaked.is_empty():
+		failed += 1
+		print("  FAIL suite wrote under user:// (must use SnapKitConfig.data_root):")
+		for p in leaked:
+			print("         - %s" % p)
+	remove_tree(sandbox)
 	print("SNAPKIT TESTS: %d passed, %d failed" % [passed, failed])
 	quit(0 if failed == 0 else 1)
+
+
+## path -> [size, modified time] for files under `dir` (recursive). Godot's
+## own log files (user://logs/) are ignored.
+static func user_files(dir := "user://") -> Dictionary:
+	var out := {}
+	var d := DirAccess.open(dir)
+	if d == null:
+		return out
+	for f in d.get_files():
+		var p := dir.path_join(f)
+		out[p] = [FileAccess.get_file_as_bytes(p).size(), FileAccess.get_modified_time(p)]
+	for sub in d.get_directories():
+		if dir == "user://" and sub == "logs":
+			continue
+		out.merge(user_files(dir.path_join(sub)))
+	return out
+
+
+static func diff_files(before: Dictionary, after: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	for p in after:
+		if not before.has(p):
+			out.append("created " + p)
+		elif before[p] != after[p]:
+			out.append("modified " + p)
+	for p in before:
+		if not after.has(p):
+			out.append("deleted " + p)
+	return out
+
+
+static func remove_tree(path: String) -> void:
+	var d := DirAccess.open(path)
+	if d == null:
+		return
+	for f in d.get_files():
+		d.remove(f)
+	for sub in d.get_directories():
+		remove_tree(path.path_join(sub))
+	DirAccess.remove_absolute(path)
 
 
 func _discover(dir_path: String) -> PackedStringArray:

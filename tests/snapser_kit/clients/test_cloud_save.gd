@@ -8,7 +8,8 @@ const FakeTransport := preload("res://tests/snapser_kit/clients/fake_transport.g
 const FakeStorageServer := preload("res://tests/snapser_kit/clients/fake_storage_server.gd")
 const FakeSaveStore := preload("res://tests/snapser_kit/clients/fake_save_store.gd")
 const FakeConfig := preload("res://tests/snapser_kit/clients/fake_config.gd")
-const STATE_DIR := "user://snapkit_test_cloud_save"
+## Under the sandbox root (set by the runner), never the real user:// dir.
+var STATE_DIR: String = SnapKitConfig.data_root.path_join("snapkit_test_cloud_save")
 
 var server: FakeStorageServer
 var _n: int = 0
