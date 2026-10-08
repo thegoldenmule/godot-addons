@@ -108,6 +108,21 @@ runner's archive-path map + traversal guard) are covered by
     --script res://tools/verify_editor_tool_kit.gd
 ```
 
+## Native (GDExtension) addons
+
+`snapser_kit_apple` ships a prebuilt iOS `.xcframework`. Two rules for addons like it:
+
+- **Keep a platform-only `.gdextension` out of the editor scan.** An iOS-only
+  `.gdextension` makes every desktop editor and every Web/desktop build log "No
+  GDExtension library found" on startup. Put it in a folder with a `.gdignore`,
+  wire it into the export from the addon's `EditorExportPlugin`, and load it at
+  runtime with `GDExtensionManager.load_extension()`. See
+  `addons/snapser_kit_apple/snapkit_apple_export_plugin.gd`.
+- **Native source lives in `tools/<name>/`, not in the addon.** Only the built
+  binary is vendored. Rebuild it with the script there (scons comes from a venv,
+  and godot-cpp is fetched pinned into a gitignored `.build/`). Commit the binary
+  and bump `version` in `plugin.cfg`.
+
 ## Releasing an update
 
 Bump `version` in the addon's `plugin.cfg`, commit, push to `main`. Done.

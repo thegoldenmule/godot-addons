@@ -1,0 +1,4 @@
+# Build intermediates (fetched godot-cpp, objects, scons state).
+.build/
+*.o
+.sconsign*.dblite

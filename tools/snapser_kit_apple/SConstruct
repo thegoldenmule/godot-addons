@@ -1,0 +1,29 @@
+#!/usr/bin/env python
+# Builds the snapser_kit_apple GDExtension static library for iOS.
+# Don't run this directly; use build_ios.sh, which fetches the pinned godot-cpp,
+# calls scons, and packages the result as an .xcframework.
+#
+#   GODOT_CPP_DIR=<path> scons platform=ios arch=arm64 target=template_release
+
+import os
+
+godot_cpp_dir = os.environ.get("GODOT_CPP_DIR", os.path.join(".build", "godot-cpp"))
+env = SConscript(os.path.join(godot_cpp_dir, "SConstruct"), exports={"api_version": "4.7"})
+
+if env["platform"] != "ios":
+    print("snapser_kit_apple only builds for platform=ios.")
+    Exit(1)
+
+env.Append(CPPPATH=["src/"])
+# The .mm file needs ARC; godot-cpp itself is plain C++.
+objc_env = env.Clone()
+objc_env.Append(CCFLAGS=["-fobjc-arc"])
+
+objects = [env.Object(f) for f in Glob("src/*.cpp")]
+objects += [objc_env.Object(f) for f in Glob("src/*.mm")]
+
+library = env.StaticLibrary(
+    target=os.path.join(".build", "lib", "libsnapser_kit_apple_only{}{}".format(env["suffix"], env["LIBSUFFIX"])),
+    source=objects,
+)
+Default(library)

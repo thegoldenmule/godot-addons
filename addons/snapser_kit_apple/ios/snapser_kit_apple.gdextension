@@ -1,0 +1,18 @@
+; Sign in with Apple native library (iOS only). Built by
+; tools/snapser_kit_apple/build_ios.sh.
+;
+; This folder has a .gdignore, so the editor never scans or loads this file.
+; snapkit_apple_export_plugin.gd packs it into iOS exports and links the
+; .xcframework; SnapKitAppleBridge loads it at runtime with
+; GDExtensionManager.load_extension(). Keep entry_symbol in sync with the
+; export plugin's ENTRY_SYMBOL and with src/register_types.cpp.
+
+[configuration]
+
+entry_symbol = "snapser_kit_apple_init"
+compatibility_minimum = "4.7"
+reloadable = false
+
+[libraries]
+
+ios = "res://addons/snapser_kit_apple/ios/snapser_kit_apple.xcframework"
