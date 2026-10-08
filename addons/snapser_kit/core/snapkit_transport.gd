@@ -1,3 +1,4 @@
+@tool
 class_name SnapKitTransport
 extends Node
 
@@ -28,6 +29,10 @@ extends Node
 ##                                      HTTP 429 and HTTP 5xx, with exponential
 ##                                      backoff (BACKOFF_BASE_S * 2^n, jittered).
 ##           "headers"   PackedStringArray  extra request headers.
+##           "no_retry"  bool  = false  disable BOTH the backoff retries and the
+##                                      401 reauth-replay. Required for calls whose
+##                                      payload is single-use (Apple authorization
+##                                      codes on /v1/auth/login/apple).
 ##
 ## Result (always this shape, never throws, never pushes errors):
 ##   { "ok": bool, "status": int, "json": Variant, "error": String }
@@ -36,7 +41,7 @@ extends Node
 ##   json    Parsed body (SnapKitJson.parse — lenient), or null.
 ##   error   "" when ok, else one of the ERR_* codes below, or "http_<status>".
 ##
-## 401 rule (ALL methods): when "auth" is true and the response is 401, the
+## 401 rule (ALL methods unless "no_retry"): when "auth" is true and the response is 401, the
 ## transport calls auth.reauth() once (keeping the same anonymous handle) and
 ## replays the request once. A second 401 is returned as "http_401".
 ##
@@ -49,12 +54,11 @@ extends Node
 ##
 ## Higher layers (clients, SnapKitService) return this same dictionary augmented
 ## with parsed fields (e.g. "entries", "value"); they never remove ok / error.
-##
-## SKELETON: request() is stubbed; the static helpers are implemented.
 
 const DEFAULT_TIMEOUT_S := 10.0
 const DEFAULT_RETRIES := 2
 const BACKOFF_BASE_S := 0.5
+const BACKOFF_MAX_S := 4.0
 const USER_ID_PLACEHOLDER := "{user_id}"
 
 ## Error codes (result["error"]). Clients reuse these; HTTP failures are
@@ -71,6 +75,10 @@ const ERR_NOT_IMPLEMENTED := "not_implemented"
 var _config: SnapKitConfig
 var _auth: SnapKitAuth
 var _mock: SnapKitMockGateway
+## Diagnostics: number of attempts sent (network or mock), for tests and logs.
+var attempts_sent: int = 0
+## Multiplier on retry backoff delays (tests set 0 to retry without waiting).
+var backoff_scale: float = 1.0
 
 
 ## Wire dependencies. Called by SnapKitService.start_with_config(); tests may call
@@ -104,7 +112,102 @@ func user_id() -> String:
 func request(method: int, path: String, body: Variant = null, opts: Dictionary = {}) -> Dictionary:
 	if is_offline():
 		return error_result(ERR_OFFLINE)
-	return error_result(ERR_NOT_IMPLEMENTED)
+	var use_auth: bool = SnapKitJson.to_bool(opts.get("auth", true), true)
+	var timeout_s: float = SnapKitJson.to_float(opts.get("timeout_s", DEFAULT_TIMEOUT_S), DEFAULT_TIMEOUT_S)
+	var no_retry: bool = SnapKitJson.to_bool(opts.get("no_retry", false), false)
+	var retries: int = 0 if no_retry else \
+		SnapKitJson.to_int(opts.get("retries", DEFAULT_RETRIES if is_idempotent(method) else 0), 0)
+	var extra: PackedStringArray = opts.get("headers", PackedStringArray()) if opts.get("headers") is PackedStringArray else PackedStringArray()
+	var payload := ""
+	if body is String:
+		payload = body
+	elif body != null:
+		payload = JSON.stringify(body)
+
+	if use_auth:
+		if _auth == null or not await _auth.ensure_session():
+			return error_result(ERR_NO_SESSION)
+
+	var res := await _send_with_retries(method, path, payload, use_auth, timeout_s, retries, extra)
+	# 401 on a locally-valid token = server-side invalidation (e.g. a snapend
+	# apply). Re-login once with the same handle and replay once.
+	if use_auth and not no_retry and int(res.status) == 401:
+		if await _auth.reauth():
+			res = await _send_with_retries(method, path, payload, use_auth, timeout_s, retries, extra)
+	return res
+
+
+func _send_with_retries(method: int, path: String, payload: String, use_auth: bool,
+		timeout_s: float, retries: int, extra: PackedStringArray) -> Dictionary:
+	var attempt := 0
+	while true:
+		var res := await _send_once(method, path, payload, use_auth, timeout_s, extra)
+		if res.ok or attempt >= retries or not is_retryable(res):
+			return res
+		attempt += 1
+		await _sleep(backoff_delay(attempt) * backoff_scale)
+	return error_result(ERR_NETWORK)  # unreachable
+
+
+func _send_once(method: int, path: String, payload: String, use_auth: bool,
+		timeout_s: float, extra: PackedStringArray) -> Dictionary:
+	var uid := user_id()
+	if path.contains(USER_ID_PLACEHOLDER) and uid == "":
+		return error_result(ERR_NO_SESSION)
+	var rel := expand_path(path, uid)
+	var headers := PackedStringArray(["Content-Type: application/json", "Accept: application/json"])
+	if use_auth and _auth != null:
+		headers.append_array(_auth.auth_headers())
+	headers.append_array(extra)
+	attempts_sent += 1
+
+	if _mock != null:
+		if _mock.latency_s > 0.0:
+			await _sleep(_mock.latency_s)
+		return _to_result(_mock.handle(method, rel, headers, payload))
+
+	var http := HTTPRequest.new()
+	http.timeout = timeout_s
+	http.use_threads = false
+	add_child(http)
+	var err := http.request(_config.gateway_url + rel, headers, method, payload)
+	if err != OK:
+		http.queue_free()
+		return error_result(ERR_NETWORK)
+	var resp: Array = await http.request_completed
+	http.queue_free()
+	var result: int = resp[0]
+	if result == HTTPRequest.RESULT_TIMEOUT:
+		return error_result(ERR_TIMEOUT)
+	if result != HTTPRequest.RESULT_SUCCESS:
+		return error_result(ERR_NETWORK)
+	return _to_result({"status": int(resp[1]), "text": (resp[3] as PackedByteArray).get_string_from_utf8()})
+
+
+## Map a raw {status, text} | {timeout} | {network_error} response to a result.
+static func _to_result(raw: Dictionary) -> Dictionary:
+	if raw.get("timeout", false):
+		return error_result(ERR_TIMEOUT)
+	if raw.get("network_error", false):
+		return error_result(ERR_NETWORK)
+	var status := int(raw.get("status", 0))
+	var json: Variant = SnapKitJson.parse(str(raw.get("text", "")))
+	if status >= 200 and status < 300:
+		return make_result(true, status, json, "")
+	return make_result(false, status, json, http_error(status))
+
+
+func _sleep(seconds: float) -> void:
+	if seconds <= 0.0 or not is_inside_tree():
+		return
+	await get_tree().create_timer(seconds, true, false, true).timeout
+
+
+## Backoff before retry `attempt` (1-based): BACKOFF_BASE_S * 2^(attempt-1),
+## capped at BACKOFF_MAX_S, with +/-25% jitter.
+static func backoff_delay(attempt: int) -> float:
+	var base := minf(BACKOFF_BASE_S * pow(2.0, attempt - 1), BACKOFF_MAX_S)
+	return base * randf_range(0.75, 1.25)
 
 
 # ---- Pure helpers (implemented; usable by clients and tests) -----------------

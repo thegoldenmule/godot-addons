@@ -55,6 +55,7 @@ func _run() -> void:
 				for f in fails:
 					print("         - %s" % f)
 
+	await process_frame   # let queue_free()d test nodes go before exit
 	print("SNAPKIT TESTS: %d passed, %d failed" % [passed, failed])
 	quit(0 if failed == 0 else 1)
 

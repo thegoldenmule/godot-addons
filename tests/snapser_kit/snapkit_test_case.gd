@@ -21,6 +21,7 @@ var tree: SceneTree
 var failures: PackedStringArray = PackedStringArray()
 
 var _nodes: Array[Node] = []
+var _mocks: Array = []
 
 
 func before_each() -> void:
@@ -54,8 +55,51 @@ func wait(seconds: float) -> void:
 	await tree.create_timer(seconds).timeout
 
 
+## A fresh user:// path for this test (file removed if it exists).
+func temp_path(file_name: String) -> String:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://snapkit_tests"))
+	var p := "user://snapkit_tests/" + file_name
+	if FileAccess.file_exists(p):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(p))
+	return p
+
+
+## An online config pointing at a mock gateway (never a real host).
+func mock_config(extra: Dictionary = {}) -> SnapKitConfig:
+	var d := {"game_id": "kit_test", "gateway_url": "http://mock.invalid"}
+	d.merge(extra, true)
+	return SnapKitConfig.from_dict(d)
+
+
+## Transport + auth wired to `mock`, added to the tree, session file in a temp
+## path, retries without backoff. Returns {transport, auth}.
+func mock_stack(mock: SnapKitMockGateway, cfg: SnapKitConfig = null) -> Dictionary:
+	if cfg == null:
+		cfg = mock_config()
+	var transport := SnapKitTransport.new()
+	var auth := SnapKitAuth.new()
+	add_node(transport)
+	add_node(auth)
+	transport.setup(cfg, auth)
+	auth.setup(cfg, transport)
+	auth.session_path = temp_path("session_%d.json" % randi())
+	transport.use_mock_gateway(track_mock(mock))
+	transport.backoff_scale = 0.0
+	return {"transport": transport, "auth": auth}
+
+
+## Reset `mock` after the test (route lambdas that capture the mock form a
+## reference cycle; reset() breaks it).
+func track_mock(mock: SnapKitMockGateway) -> SnapKitMockGateway:
+	_mocks.append(mock)
+	return mock
+
+
 ## Called by the runner after after_each().
 func _free_nodes() -> void:
+	for m in _mocks:
+		m.reset()
+	_mocks.clear()
 	for n in _nodes:
 		if is_instance_valid(n):
 			n.queue_free()

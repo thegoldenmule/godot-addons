@@ -1,0 +1,32 @@
+{
+  "service_definition": {
+    "id": "quests",
+    "language": "go",
+    "version": "v1.10.0",
+    "author_id": "snapser",
+    "category": "SNAPSER",
+    "subcategory": "SERVICE",
+    "data_dependencies": [
+      {
+        "type": "POSTGRES",
+        "postgres": {
+          "database": "quests_settings"
+        }
+      },
+      {
+        "type": "REDIS",
+        "redis": {}
+      },
+      {
+        "type": "COUCHBASE",
+        "couchbase": {}
+      }
+    ]
+  },
+  "settings": {
+    "id": "quests",
+    "data": {
+      "quests": []
+    }
+  }
+}

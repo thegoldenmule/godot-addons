@@ -18,7 +18,24 @@ wiki/                 EMITTED docs (Hotseat workspace -> markdown). Never hand-e
 ```
 
 Currently: `ui_kit` (UI shell infra), `editor_tool_kit` (editor-tool base classes),
-and `remote_config_editor` (manifest-driven remote-config aggregation/publish).
+`remote_config_editor` (manifest-driven remote-config aggregation/publish),
+`build_kit` (device builds), and `snapser_kit` (Snapser client + `SnapKitService`;
+tests in `tests/snapser_kit/`, provisioning/smoke tooling in `tools/snapser/`).
+
+> **THIS REPO IS PUBLIC.** Never commit Snapser snapend IDs, application IDs,
+> gateway URLs, API keys, `.env`, `secrets.cfg` or `*.p8` files — not in code,
+> tests, docs or examples (use placeholders like `<snapend-id>`). Those live in
+> each game's own repo. Before committing, run:
+> `git diff --cached | grep -nE '(SNAPSER_API_KE[Y]|BEGIN PRIVATE KE[Y]|AuthKe[y]_|api[_-]?key\s*[:=])'`
+> and abort on a hit. (The bracket classes match the same secrets but keep this
+> line from matching itself.)
+
+snapser_kit tests (headless, never touch the network):
+
+```bash
+SNAPSER_OFFLINE=1 /Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
+    --script res://tests/snapser_kit/run_tests.gd
+```
 
 ## The vendoring + self-update model
 
