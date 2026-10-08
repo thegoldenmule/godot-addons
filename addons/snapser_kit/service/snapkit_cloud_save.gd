@@ -57,6 +57,14 @@ extends Node
 ##     writes; those are ignored while importing, so a pull never schedules a
 ##     push.
 ##   - pull() / push() are serialized (one at a time); concurrent callers wait.
+##   - BOOLS ARE MONOTONIC PROGRESS FLAGS on EVERY pull path (v0.2.1): a `true`
+##     on either side stays true, including when only the remote changed (the
+##     "take remote" path) — a remote `false` / missing key never re-locks an
+##     earned flag. When that keeps a local value, the result is pushed back.
+##   - Per-key policy (config cloud_save.merge_policy, key or "prefix*"):
+##     "max" (numbers), "or" (bools), "remote", "local". It applies on every
+##     pull path after the merge and overrides the bool default — e.g.
+##     {"sax_set_tutorial_seen": "remote"} opts a flag out of monotonic OR.
 ##   - default_merge(): per key — bools OR (progress flags), numbers take max,
 ##     arrays take union, anything
 ##     else takes the newer side's value (by updated_at vs the last local change).
@@ -243,6 +251,76 @@ func export_local() -> Dictionary:
 	return out
 
 
+## The config's per-key merge policies ({} when none).
+func merge_policies() -> Dictionary:
+	if _config == null or not _config.has_method("cloud_save_merge_policy"):
+		return {}
+	return _config.cloud_save_merge_policy()
+
+
+## Policy for `key`: an exact entry wins, else the longest matching "prefix*"
+## entry, else "".
+static func policy_for(key: String, policies: Dictionary) -> String:
+	if policies.has(key):
+		return str(policies[key])
+	var best := ""
+	var best_len := -1
+	for p in policies:
+		var ps := str(p)
+		if ps.ends_with("*"):
+			var pre := ps.trim_suffix("*")
+			if key.begins_with(pre) and pre.length() > best_len:
+				best = str(policies[p])
+				best_len = pre.length()
+	return best
+
+
+## Apply monotonic bools and per-key policies on top of `base` (the result a
+## pull path chose: the remote data, or the merge). For every key on either
+## side:
+##   "local" / "remote": that side's value (absent there -> key removed);
+##   "max": larger number (one-sided -> that side);
+##   "or" / no policy: if either side holds bool `true` (and the other side is
+##     a bool or absent) the key is `true`.
+## Other keys keep `base`'s value. Inputs are not modified.
+static func apply_policies(base: Dictionary, local: Dictionary, remote: Dictionary, policies: Dictionary = {}) -> Dictionary:
+	var out := base.duplicate(true)
+	var keys := {}
+	for k in local:
+		keys[k] = true
+	for k in remote:
+		keys[k] = true
+	for k in keys:
+		var hl := local.has(k)
+		var hr := remote.has(k)
+		var lv: Variant = local.get(k)
+		var rv: Variant = remote.get(k)
+		match policy_for(str(k), policies):
+			"local":
+				if hl:
+					out[k] = _copy(lv)
+				else:
+					out.erase(k)
+			"remote":
+				if hr:
+					out[k] = _copy(rv)
+				else:
+					out.erase(k)
+			"max":
+				if hl and hr and _is_number(lv) and _is_number(rv):
+					out[k] = rv if rv > lv else lv
+				elif hl and not hr and _is_number(lv):
+					out[k] = lv
+				elif hr and not hl and _is_number(rv):
+					out[k] = rv
+			_:
+				var lb := hl and typeof(lv) == TYPE_BOOL
+				var rb := hr and typeof(rv) == TYPE_BOOL
+				if (lb or not hl) and (rb or not hr) and ((lb and lv) or (rb and rv)):
+					out[k] = true
+	return out
+
+
 ## Per-key default merge of two `data` maps (see class doc): bools OR, numbers
 ## max, arrays union; `remote_is_newer` decides everything else. Override
 ## SnapKitService._merge() for a different policy (call this for the rest).
@@ -361,14 +439,20 @@ func _pull_locked(attempt: int) -> Dictionary:
 	if not remote_changed:
 		return _with(await _push_locked(local, remote_cas, env.version, attempt), {"applied": APPLIED_LOCAL})
 	if not local_changed:
-		_import_local(remote)
-		_record_sync(remote_cas, data_hash(export_local()), env.version)
-		synced.emit("pull")
-		return _with(got, {"applied": APPLIED_REMOTE})
+		# Remote-only change: take remote, but monotonic bools and explicit
+		# per-key policies still apply (an earned flag is never re-locked).
+		var taken := apply_policies(remote, local, remote, merge_policies())
+		_import_local(taken)
+		if data_hash(export_local()) == data_hash(remote):
+			_record_sync(remote_cas, data_hash(export_local()), env.version)
+			synced.emit("pull")
+			return _with(got, {"applied": APPLIED_REMOTE})
+		# Local kept something the remote lacks: push the merged result.
+		return _with(await _push_locked(export_local(), remote_cas, env.version, attempt), {"applied": APPLIED_MERGED})
 
 	conflict.emit(local.duplicate(true), remote.duplicate(true))
 	var remote_is_newer := int(env.updated_at) >= int(_state.get("local_changed_at", 0))
-	_import_local(_resolve(local, remote, remote_is_newer))
+	_import_local(apply_policies(_resolve(local, remote, remote_is_newer), local, remote, merge_policies()))
 	var merged := export_local()
 	return _with(await _push_locked(merged, remote_cas, env.version, attempt), {"applied": APPLIED_MERGED})
 

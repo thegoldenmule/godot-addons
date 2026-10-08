@@ -25,6 +25,7 @@ Web-safe: it uses no threads.
      "cloud_save": { "blob_key": "save_v1", "sync_prefixes": ["sax_prog_"], "sync_keys": ["sax_militia_unlocked"] },
      "link_providers": ["apple"],
      "quests": false,
+     "offline_paths": ["res://tests", "res://tools"],
      "declared": {
        "stats": ["hits"], "boards": ["career_wins"],
        "events": ["session_start", "session_end", "online_state", "run_start", "run_end", "screen_view"],
@@ -43,7 +44,12 @@ Web-safe: it uses no threads.
 
 The first matching rule wins:
 1. `SNAPSER_OFFLINE=1` or `--snapser-offline` forces offline. Tests and capture runs use this.
-   - **Test and tool runs are offline automatically.** A run counts as one when a scene or script on the command line, or the main scene, is under `res://tests/` or `res://tools/`. Set `SNAPSER_TESTS_ONLINE=1` to opt a live end-to-end test back in.
+   - **Test, tool and headless runs are offline automatically, and the check fails closed.** A run counts as one when:
+     - it's a `--script` / `-s` run;
+     - a scene or script on the command line, or the main scene, lies under one of `offline_paths`. Paths are normalised first, so `res://`, relative, absolute and `uid://` forms all count. The default is `["res://tests", "res://tools"]`; set `"offline_paths"` in the config to replace the list, e.g. add `"res://scenes/tools"`;
+     - the process is **headless**.
+
+     Set `SNAPSER_TESTS_ONLINE=1` to opt a live end-to-end test back in.
    - At runtime, `Snapser.force_offline(reason)` switches the kit offline, for example from a settings toggle. On a bare config, use `SnapKitConfig.force_offline(reason)`.
    - **Offline and test runs write nothing under `user://`:** no session file, no cloud-save state file. That bookkeeping stays in memory until the kit is online.
 2. The `SNAPSER_GATEWAY_URL` environment variable.
@@ -67,7 +73,7 @@ When offline, every call returns `{ok:false, error:"offline"}` immediately, so g
 | Stats | `record_stat(key, value)`, `increment_stat(key, delta)` (keys `^[a-z0-9_]+$`) |
 | Leaderboards | `submit_score(board, score)`, `top_scores(board, n)`, `scores_around_me(board, n)` (boards map through `config.leaderboards`) |
 | Remote config | `remote_config()` (cached), `refresh_remote_config()` |
-| Cloud save | `cloud_save_push()`, `cloud_save_pull()`. Override `_merge(local, remote)`. The default merges bools with OR, numbers with max and arrays with union; anything else takes the newer value. Set `save_store` (duck-typed `export_prefix` / `import_prefix` / optional `changed` signal) or rely on `/root/SaveService`. After a pull or merge, `cloud_save_applied(keys)` lists what changed locally; refresh caches from it. Synced keys are those under `sync_prefixes` plus the exact names in `sync_keys`. A pull adds and overwrites exact keys but never deletes them, and never touches siblings that merely start with the same text. |
+| Cloud save | `cloud_save_push()`, `cloud_save_pull()`. Override `_merge(local, remote)`. The default merges bools with OR, numbers with max and arrays with union; anything else takes the newer value. Set `save_store` (duck-typed `export_prefix` / `import_prefix` / optional `changed` signal) or rely on `/root/SaveService`. After a pull or merge, `cloud_save_applied(keys)` lists what changed locally; refresh caches from it. Synced keys are those under `sync_prefixes` plus the exact names in `sync_keys`. **Bools are monotonic progress flags on every pull path:** a `true` on either side stays `true`, even when only the remote changed. Per-key overrides go in `cloud_save.merge_policy`: `{"<key>" or "<prefix>*": "max" | "or" | "remote" | "local"}`. For example, `"sax_set_tutorial_seen": "remote"` opts a flag out. A pull adds and overwrites exact keys but never deletes them, and never touches siblings that merely start with the same text. |
 | Analytics | `track(event, props)`: queued and batched; never blocks. The kit sends `session_start`, `session_end` and `online_state` itself. |
 | Profile | `display_name()` (never empty), `set_display_name(name)`: trims, length-limits (3–16) and filters. Names are **not unique** (D33). |
 | Identity | `register_identity_provider(name, bridge)`, `link_account(provider)`, `switch_account(result)`, `linked_providers()` |
@@ -97,6 +103,10 @@ Lower layers are public for advanced use:
   - Named Snapser codes (`SnapKitErrors`): `undeclared` (also stat 4000 / event 2000), `quest_not_claimable` (15014), `cas_conflict` (5007), `already_exists`, `not_found`, `invalid_property_value`, `anon_login_disabled`.
   - Otherwise `http_<status>`.
   - Client-level codes: `bad_response`, `invalid_argument`, `disabled`, `not_implemented`.
+
+### ⚠ `cloud_save_applied`: refresh game state before anything saves
+
+A pull or merge writes straight into the save store, while the game's in-memory state (unlocked modes, achievement caches, registries) still holds the old values. Refresh that state from the store **synchronously, inside the `cloud_save_applied(keys)` handler**, before anything can call a save. If the game saves its stale in-memory copy first, it overwrites the pulled data, and the next sync propagates the loss. This is the theo-asteroids failure mode: a remote `false` re-locked an earned mode until it was fixed in 0.2.1.
 
 ### Declarations
 

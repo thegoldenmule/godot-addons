@@ -25,8 +25,7 @@ done
 abs() { echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; }
 godot="${GODOT:-/Applications/Godot.app/Contents/MacOS/Godot}"
 [[ -x "$godot" ]] || godot="$(command -v godot)"
-if [[ ! -f "$addons_root/.godot/global_script_class_cache.cfg" ]]; then
-  "$godot" --headless --editor --quit --path "$addons_root" >/dev/null 2>&1 || true
-fi
+# Rebuild a missing or stale class cache first.
+"$godot" --headless --path "$addons_root" --import >/dev/null 2>&1 || { echo "check_declarations: --import failed" >&2; exit 2; }
 exec "$godot" --headless --path "$addons_root" --script res://tools/snapser/check_declarations.gd \
   -- --config="$(abs "$config")" --manifest="$(abs "$manifest")"

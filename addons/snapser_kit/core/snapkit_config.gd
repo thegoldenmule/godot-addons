@@ -20,11 +20,21 @@ extends RefCounted
 ## Resolution order (first match wins for "offline" / "gateway_url"):
 ##   1. SNAPSER_OFFLINE=1 in the environment, or `--snapser-offline` on the
 ##      command line (user args after `--` or engine args) -> forced offline.
-##   1b. A TEST / TOOL RUN -> offline unless SNAPSER_TESTS_ONLINE=1: any
-##      command-line arg (scene or --script path) or the main scene under
-##      res://tests/ or res://tools/ (also the bare "tests/..." / "tools/..."
-##      spellings). Headless suites therefore never touch the network even
-##      though the gateway is committed (DoD 7).
+##   1b. A TEST / TOOL RUN -> offline unless SNAPSER_TESTS_ONLINE=1. FAILS
+##      CLOSED (v0.2.1): the run is treated as a test/tool run when
+##        - it is a `--script` / `-s` run (a SceneTree/MainLoop script is never
+##          the game itself), or
+##        - any command-line scene/script path, or the main scene, lies under
+##          one of `offline_paths` (config; default res://tests, res://tools).
+##          Paths are normalised first: res://, relative ("tests/x.gd",
+##          "./tools/y.tscn"), absolute filesystem paths inside the project
+##          (ProjectSettings.localize_path) and uid:// all resolve, or
+##        - the process is HEADLESS (DisplayServer "headless"): a headless run
+##          cannot be shown to be a player's game, so it stays offline.
+##      Headless suites therefore never touch the network even though the
+##      gateway is committed (DoD 7). Live tests opt in with
+##      SNAPSER_TESTS_ONLINE=1; the kit's smoke runner builds its config with
+##      from_dict() and is unaffected.
 ##   2. SNAPSER_GATEWAY_URL environment variable -> gateway_url.
 ##   3. user://snapser_kit.override.json, DEBUG BUILDS ONLY. May contain
 ##      "gateway_url" and/or "offline": true. Other keys are ignored.
@@ -57,6 +67,14 @@ const ARG_OFFLINE := "--snapser-offline"
 const ENV_TESTS_ONLINE := "SNAPSER_TESTS_ONLINE"
 ## Path prefixes that mark a test / tool run (rule 1b).
 const TEST_TOOL_PREFIXES := ["res://tests/", "res://tools/", "tests/", "tools/", "./tests/", "./tools/"]
+## Default auto-offline roots (config "offline_paths" overrides).
+const DEFAULT_OFFLINE_PATHS := ["res://tests", "res://tools"]
+## Synthetic arg from_project() adds for a headless process (rule 1b).
+const ARG_HEADLESS_RUN := "--snapkit-headless-run"
+## Script-runner flags: a run started with these is a tool/test run.
+const SCRIPT_RUN_FLAGS := ["--script", "-s"]
+## Cloud-save per-key merge policies (cloud_save.merge_policy).
+const MERGE_POLICIES := ["max", "or", "remote", "local"]
 ## Declaration kinds accepted under "declared".
 const DECLARED_KINDS := ["stats", "boards", "events", "blobs"]
 
@@ -79,6 +97,10 @@ var cloud_save: Dictionary = {}
 var link_providers: PackedStringArray = PackedStringArray()
 ## The whole parsed committed file, including keys this class does not model.
 var raw: Dictionary = {}
+## Roots whose scenes/scripts make a run a test/tool run (rule 1b); committed
+## "offline_paths", default DEFAULT_OFFLINE_PATHS. e.g. ["res://tests",
+## "res://tools", "res://scenes/tools"].
+var offline_paths: PackedStringArray = PackedStringArray(DEFAULT_OFFLINE_PATHS)
 ## Root directory for EVERY file the kit writes (session file, cloud-save state,
 ## editor probe): one sandbox switch. Default "user://" (the game's normal data
 ## dir — real games never change it). Test harnesses point it at a scratch dir
@@ -120,6 +142,10 @@ static func from_project(path: String = DEFAULT_PATH) -> SnapKitConfig:
 	var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
 	if main_scene != "":
 		args.append(main_scene)
+	# Engine flags such as --headless never reach get_cmdline_args(), so ask
+	# the display server and pass a marker the pure resolver understands.
+	if DisplayServer.get_name() == "headless":
+		args.append(ARG_HEADLESS_RUN)
 	var is_debug := OS.is_debug_build()
 	var override := _read_json_file(OVERRIDE_PATH) if is_debug else {}
 	return resolve(committed, env, args, override, is_debug)
@@ -141,9 +167,11 @@ static func resolve(committed: Dictionary, env: Dictionary, args: PackedStringAr
 		return cfg._set_offline("%s=%s" % [ENV_OFFLINE, str(env.get(ENV_OFFLINE))])
 	if args.has(ARG_OFFLINE):
 		return cfg._set_offline(ARG_OFFLINE)
-	if is_test_or_tool_run(args) \
-			and not SnapKitJson.to_bool(str(env.get(ENV_TESTS_ONLINE, "")).strip_edges(), false):
-		return cfg._set_offline("test/tool run (set %s=1 to allow the network)" % ENV_TESTS_ONLINE)
+	if not SnapKitJson.to_bool(str(env.get(ENV_TESTS_ONLINE, "")).strip_edges(), false):
+		if is_test_or_tool_run(args, cfg.offline_paths):
+			return cfg._set_offline("test/tool run (set %s=1 to allow the network)" % ENV_TESTS_ONLINE)
+		if args.has(ARG_HEADLESS_RUN):
+			return cfg._set_offline("headless run (set %s=1 to allow the network)" % ENV_TESTS_ONLINE)
 
 	# 2-4. First gateway source that is set wins.
 	var url := ""
@@ -206,15 +234,51 @@ func force_offline(reason: String = "forced offline") -> SnapKitConfig:
 	return _set_offline(reason if reason != "" else "forced offline")
 
 
-## True when any arg names a scene/script under res://tests/ or res://tools/
-## (rule 1b). Pass OS.get_cmdline_args() (+ user args, + the main scene).
-static func is_test_or_tool_run(args: PackedStringArray) -> bool:
+## True for a test/tool run (rule 1b, path part): a `--script` / `-s` run, or
+## any arg that names a scene/script under one of `roots` once normalised to a
+## res:// path. Pass OS.get_cmdline_args() (+ user args, + the main scene).
+## The headless part of rule 1b is the ARG_HEADLESS_RUN marker, checked in
+## resolve().
+static func is_test_or_tool_run(args: PackedStringArray, roots: PackedStringArray = PackedStringArray(DEFAULT_OFFLINE_PATHS)) -> bool:
 	for a in args:
 		var s := str(a).strip_edges()
-		for p in TEST_TOOL_PREFIXES:
-			if s.begins_with(p) and (p.begins_with("res://") or s.ends_with(".gd") or s.ends_with(".tscn") or s.ends_with(".scn")):
+		if s in SCRIPT_RUN_FLAGS:
+			return true
+		var res_path := as_res_path(s)
+		if res_path == "":
+			continue
+		for root in roots:
+			var r := str(root).strip_edges().trim_suffix("/")
+			if r == "":
+				continue
+			if not r.begins_with("res://"):
+				r = "res://" + r.trim_prefix("./")
+			if res_path == r or res_path.begins_with(r + "/"):
 				return true
 	return false
+
+
+## An arg as a res:// path when it looks like a scene / script / resource path
+## (res://, uid://, an absolute filesystem path inside the project, or a
+## project-relative path); "" otherwise (flags, values, outside paths).
+static func as_res_path(arg: String) -> String:
+	var s := arg.strip_edges()
+	if s == "" or s.begins_with("-"):
+		return ""
+	if s.begins_with("res://"):
+		return s.simplify_path()
+	if s.begins_with("uid://"):
+		var id := ResourceUID.text_to_id(s)
+		return ResourceUID.get_id_path(id) if id != ResourceUID.INVALID_ID and ResourceUID.has_id(id) else ""
+	var ext := s.get_extension().to_lower()
+	if not (ext in ["gd", "tscn", "scn", "res", "tres"]) and not s.contains("/"):
+		return ""
+	if s.is_absolute_path():
+		var local := ProjectSettings.localize_path(s)
+		return local if local.begins_with("res://") else ""
+	if s.contains("://"):
+		return ""
+	return ("res://" + s.trim_prefix("./")).simplify_path()
 
 
 ## True when `kind` has a "declared" list.
@@ -332,6 +396,23 @@ func cloud_save_keys() -> PackedStringArray:
 	return out
 
 
+## Per-key cloud-save merge policy: cloud_save.merge_policy (or a top-level
+## "merge_policy"), {"<key>" | "<prefix>*": "max" | "or" | "remote" | "local"}.
+## Unknown policy values are dropped with a warning.
+func cloud_save_merge_policy() -> Dictionary:
+	var src := SnapKitJson.get_dict(cloud_save, "merge_policy")
+	if src.is_empty():
+		src = SnapKitJson.get_dict(raw, "merge_policy")
+	var out := {}
+	for k in src:
+		var v := str(src[k]).to_lower()
+		if v in MERGE_POLICIES and str(k) != "":
+			out[str(k)] = v
+		else:
+			push_warning("[SnapKit] merge_policy '%s': unknown policy '%s' (use %s)" % [k, src[k], ", ".join(MERGE_POLICIES)])
+	return out
+
+
 ## True when cloud save has anything to sync (prefixes or exact keys).
 func cloud_save_enabled() -> bool:
 	return not cloud_save_prefixes().is_empty() or not cloud_save_keys().is_empty()
@@ -383,6 +464,13 @@ func _apply_committed(d: Dictionary) -> void:
 	for p in SnapKitJson.get_array(d, "link_providers"):
 		if p is String and p != "":
 			link_providers.append(p)
+	offline_paths = PackedStringArray(DEFAULT_OFFLINE_PATHS)
+	if d.get("offline_paths") is Array:
+		var paths := PackedStringArray()
+		for p in d.offline_paths:
+			if p is String and p.strip_edges() != "":
+				paths.append(p.strip_edges())
+		offline_paths = paths
 	declared = {}
 	var decl := SnapKitJson.get_dict(d, "declared")
 	for kind in DECLARED_KINDS:

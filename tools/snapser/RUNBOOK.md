@@ -136,6 +136,13 @@ tools/snapser/clear_board_rows.sh --snapend <id> --board career_wins --all-rows 
   - the **Leaderboards** tool, or
   - **User Manager → Bulk User Data → Reset**, with the printed user ids. This works on dev snapends only, and resets all of those users' snap data except Auth.
 
-## Test and tool runs stay offline
+## Test, tool and headless runs stay offline (fail closed)
 
-The kit treats any run whose scene or script, or the main scene, is under `res://tests/` or `res://tools/` as offline, unless `SNAPSER_TESTS_ONLINE=1` is set. A committed gateway therefore never puts headless suites online (DoD 7). Offline and test runs also write nothing under `user://`, so suites leave no kit files behind.
+The kit resolves offline, unless `SNAPSER_TESTS_ONLINE=1` is set, when any of these holds:
+- the run is a `--script` / `-s` run;
+- a scene or script on the command line, or the main scene, is under the config's `offline_paths` (default `res://tests`, `res://tools`). Paths in `res://`, relative, absolute and `uid://` form all count;
+- the process is headless.
+
+This closes the 0.2.0 hole. A test launched with an absolute `--script` path resolved online, logged in to the game's snapend and hung on network calls. A committed gateway therefore never puts headless suites online (DoD 7), and offline or test runs write nothing under `user://`.
+
+`run_smoke.sh` always runs `--import` first, so a stale class cache can't break the script. It also kills a hung run: `SMOKE_IMPORT_TIMEOUT_S` defaults to 240 and `SMOKE_TIMEOUT_S` to 300, and a timeout exits 124.

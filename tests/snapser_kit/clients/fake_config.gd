@@ -6,6 +6,7 @@ extends SnapKitConfig
 var prefixes: PackedStringArray = PackedStringArray(["prog_"])
 var blob: String = "save_v1"
 var keys: PackedStringArray = PackedStringArray()
+var policies: Dictionary = {}
 ## Tests flip this to exercise offline behaviour (no state file writes).
 var pretend_offline: bool = false
 
@@ -20,6 +21,10 @@ func cloud_save_blob_key() -> String:
 
 func cloud_save_keys() -> PackedStringArray:
 	return keys
+
+
+func cloud_save_merge_policy() -> Dictionary:
+	return policies
 
 
 func is_offline() -> bool:
