@@ -5,7 +5,8 @@ extends SceneTree
 ## snapser_kit.config.json>:
 ##
 ##   godot --headless --path <godot-addons> --script res://tools/snapser/smoke/smoke.gd \
-##       -- --config=/abs/path/game/snapser_kit.config.json [--board=<logical>] [--verbose]
+##       -- --config=/abs/path/game/snapser_kit.config.json [--stat=<declared key>]
+##          [--board=<logical>] [--verbose]
 ##
 ## Safety:
 ##   - The gateway is taken ONLY from that config file (SnapKitConfig.from_dict,
@@ -63,10 +64,19 @@ func _run() -> void:
 		return
 
 	print("SMOKE: game=%s gateway=%s" % [cfg.game_id, cfg.gateway_url])
+	var store := SmokeStore.new()
+	var prefixes := cfg.cloud_save_prefixes()
+	var prefix := prefixes[0] if not prefixes.is_empty() else ""
+	if prefix != "":
+		store.set_value(prefix + "smoke_local", 1)
 	var svc := SnapKitService.new()
+	svc.save_store = store
 	root.add_child(svc)
 	svc.start_with_config(cfg)
 	svc.auth.session_path = "user://snapkit_smoke_%s.json" % cfg.game_id
+	# Fresh cloud-save bookkeeping each run: the first sync merges the in-memory
+	# store with whatever earlier runs left in the blob.
+	svc.cloud_save.state_path = "user://snapkit_smoke_%s_cloud_%d.json" % [cfg.game_id, randi()]
 	await svc.boot_finished
 
 	# --- core ------------------------------------------------------------------
@@ -83,14 +93,33 @@ func _run() -> void:
 	_record("auth.reauth_same_user", "PASS" if re_ok and svc.user_id() == uid else "FAIL",
 		"re-login with persisted handle keeps user %s" % uid)
 
-	# --- clients (kit-clients agent) -----------------------------------------
+	# --- clients ------------------------------------------------------------
 	_check("remote_config.fetch", await svc.refresh_remote_config(),
-		func(r: Dictionary) -> String: return "%d top-level keys" % (r.get("config", {}) as Dictionary).size())
-	var runs_key := "smoke_runs"
-	_check("stats.increment", await svc.increment_stat(runs_key, 1),
-		func(r: Dictionary) -> String: return "%s = %s" % [runs_key, r.get("value")])
-	_check("stats.set", await svc.record_stat("smoke_last_unix", int(Time.get_unix_time_from_system())),
-		func(_r: Dictionary) -> String: return "smoke_last_unix set")
+		func(r: Dictionary) -> String: return "keys %s" % str((r.get("config", {}) as Dictionary).keys()))
+	if svc.quests_client != null:
+		_check("quests.fetch_active", await svc.quests_fetch_active(),
+			func(r: Dictionary) -> String: return "%d active quests" % (r.get("quests", []) as Array).size())
+
+	# Stats: keys must be declared on the snapend (undeclared -> 404), so the key
+	# comes from --stat=<declared key>.
+	var stat := str(args.get("stat", ""))
+	if stat == "":
+		_record("stats.*", "SKIP", "pass --stat=<a stat key declared on the snapend>")
+	else:
+		var inc := await svc.increment_stat(stat, 1)
+		_check("stats.increment", inc,
+			func(r: Dictionary) -> String: return "%s = %s" % [stat, r.get("value")])
+		var base := SnapKitJson.to_int(inc.get("value"), 1)
+		_check("stats.set", await svc.record_stat(stat, base + 1),
+			func(r: Dictionary) -> String: return "%s = %s" % [stat, r.get("value", base + 1)])
+
+	# Display name first, so the board read below can show it.
+	# Random suffix: repeat runs must not trip a unique-name constraint.
+	var smoke_name := "Smoke Tester %s" % Crypto.new().generate_random_bytes(2).hex_encode()
+	_check("profiles.set_display_name", await svc.set_display_name(smoke_name),
+		func(r: Dictionary) -> String: return "stored '%s'" % r.get("display_name", ""))
+	_check("profiles.fetch", await svc.refresh_profile(),
+		func(_r: Dictionary) -> String: return "display_name() = '%s'" % svc.display_name())
 
 	var board := str(args.get("board", ""))
 	if board == "" and not cfg.leaderboards.is_empty():
@@ -101,28 +130,91 @@ func _run() -> void:
 		_check("leaderboards.submit", await svc.submit_score(board, randi_range(1, 1000)),
 			func(_r: Dictionary) -> String: return "board %s -> %s" % [board, cfg.leaderboard_id(board)])
 		_check("leaderboards.top", await svc.top_scores(board, 5),
-			func(r: Dictionary) -> String: return "%d entries" % (r.get("entries", []) as Array).size())
-		_check("leaderboards.around_me", await svc.scores_around_me(board, 2),
-			func(r: Dictionary) -> String: return "%d entries" % (r.get("entries", []) as Array).size())
+			func(r: Dictionary) -> String: return _describe_entries(r))
+		var around := await svc.scores_around_me(board, 2)
+		var me_name := ""
+		for e in around.get("entries", []):
+			if e.get("is_me", false):
+				me_name = str(e.get("display_name", ""))
+		if around.get("ok", false) and me_name != smoke_name:
+			_record("leaderboards.around_me_name", "FAIL", "my entry shows '%s', expected '%s'" % [me_name, smoke_name])
+		else:
+			_check("leaderboards.around_me_name", around,
+				func(r: Dictionary) -> String: return _describe_entries(r))
 
-	_check("profiles.set_display_name", await svc.set_display_name("Smoke Tester"),
-		func(r: Dictionary) -> String: return "stored '%s'" % r.get("display_name", ""))
-	_check("profiles.fetch", await svc.refresh_profile(),
-		func(_r: Dictionary) -> String: return "display_name() = '%s'" % svc.display_name())
-
-	var blob := cfg.cloud_save_blob_key()
-	_check("storage.put_json_blob", await svc.storage_client.put_json_blob(blob,
-		{"version": 1, "updated_at": int(Time.get_unix_time_from_system()), "device_id": "smoke", "data": {}}),
-		func(_r: Dictionary) -> String: return "blob %s" % blob)
-	_check("storage.get_json_blob", await svc.storage_client.get_json_blob(blob),
-		func(r: Dictionary) -> String: return "exists=%s" % r.get("exists"))
+	# Cloud save: push, simulated second-device write (CAS changes), push again
+	# -> CAS conflict resolved by merge, then a clean pull.
+	if prefix == "":
+		_record("cloud_save.*", "SKIP", "config has no cloud_save.sync_prefixes")
+	else:
+		store.set_value(prefix + "smoke_counter", randi_range(1, 1000))
+		_check("cloud_save.push", await svc.cloud_save_push(),
+			func(r: Dictionary) -> String: return "conflict=%s" % r.get("conflict"))
+		var blob := svc.cloud_save.blob_key()
+		var got := await svc.storage_client.get_json_blob(blob)
+		var other_ok := false
+		if got.get("ok", false) and got.get("value") is Dictionary:
+			var env: Dictionary = (got.value as Dictionary).duplicate(true)
+			var data: Dictionary = env.get("data", {})
+			data.merge(SnapKitCloudSave.encode_data({prefix + "smoke_other_device": 7}), true)
+			env["data"] = data
+			env["version"] = SnapKitJson.to_int(env.get("version"), 0) + 1
+			env["device_id"] = "smoke-other-device"
+			var w := await svc.storage_client.put_json_blob_cas(blob, env, str(got.get("cas", "")))
+			other_ok = w.get("ok", false)
+			_check("cloud_save.other_device_write", w,
+				func(_r: Dictionary) -> String: return "server CAS advanced")
+		else:
+			_check("cloud_save.other_device_write", got, func(_r: Dictionary) -> String: return "")
+		if other_ok:
+			store.set_value(prefix + "smoke_counter", randi_range(1001, 2000))
+			var p2 := await svc.cloud_save_push()
+			if p2.get("ok", false) and not p2.get("conflict", false):
+				_record("cloud_save.cas_conflict", "FAIL", "stale CAS was not detected")
+			else:
+				_check("cloud_save.cas_conflict", p2,
+					func(r: Dictionary) -> String: return "conflict detected, merged + pushed (applied=%s)" % r.get("applied", "?"))
+			var merged_in := store.data.has(prefix + "smoke_other_device")
+			_record("cloud_save.merge_kept_other_device", "PASS" if merged_in else "FAIL",
+				"other device's key %s locally" % ("present" if merged_in else "MISSING"))
+		_check("cloud_save.pull", await svc.cloud_save_pull(),
+			func(r: Dictionary) -> String: return "applied=%s" % r.get("applied"))
 
 	svc.track("screen_view", {"screen": "smoke"})
 	_check("analytics.flush", await svc.analytics_client.flush(),
-		func(r: Dictionary) -> String: return "sent %s" % r.get("sent"))
+		func(r: Dictionary) -> String: return "sent %s, failed %s" % [r.get("sent"), r.get("failed")])
 
 	svc.queue_free()
 	_finish()
+
+
+func _describe_entries(r: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for e in r.get("entries", []):
+		parts.append("#%s %s=%s%s" % [e.get("rank"), e.get("display_name", ""), e.get("score"),
+			" (me)" if e.get("is_me", false) else ""])
+	return "%d entries: %s" % [parts.size(), ", ".join(parts)]
+
+
+## In-memory SaveService-shaped store (amendment 6 duck type).
+class SmokeStore extends RefCounted:
+	signal changed(key: String)
+	var data := {}
+	func keys_with_prefix(prefix: String) -> PackedStringArray:
+		return PackedStringArray(data.keys().filter(func(k: String) -> bool: return k.begins_with(prefix)))
+	func export_prefix(prefix: String) -> Dictionary:
+		var out := {}
+		for k in data:
+			if str(k).begins_with(prefix):
+				out[k] = data[k]
+		return out
+	func import_prefix(_prefix: String, incoming: Dictionary) -> void:
+		for k in incoming:
+			data[k] = incoming[k]
+			changed.emit(k)
+	func set_value(key: String, value: Variant) -> void:
+		data[key] = value
+		changed.emit(key)
 
 
 func _check(step: String, res: Dictionary, detail: Callable) -> void:

@@ -184,6 +184,49 @@ func test_save_store_duck_typing() -> void:
 func test_merge_default_delegates_to_cloud_save() -> void:
 	var svc := SnapKitService.new()
 	add_node(svc)
-	# Implementation lives in SnapKitCloudSave (kit-clients); just ensure no crash
-	# and a Dictionary comes back.
-	check(svc._merge({"a": 1}, {"a": 2}) is Dictionary, "dictionary")
+	check_eq(svc._merge({"a": 1}, {"a": 2}), {"a": 2}, "numbers take max (before start)")
+
+
+func test_merge_scalar_follows_last_remote_is_newer() -> void:
+	var svc := _service(SnapKitConfig.from_dict({}))
+	await svc.boot_finished
+	svc.cloud_save.last_remote_is_newer = false
+	check_eq(svc._merge({"name": "local", "n": 1}, {"name": "remote", "n": 5}),
+		{"name": "local", "n": 5}, "local newer: scalar keeps local, number takes max")
+	svc.cloud_save.last_remote_is_newer = true
+	check_eq(svc._merge({"name": "local"}, {"name": "remote"}), {"name": "remote"},
+		"remote newer: scalar takes remote")
+
+
+func test_leaderboards_share_profiles_client() -> void:
+	var svc := _service(SnapKitConfig.from_dict({}))
+	await svc.boot_finished
+	check(svc.leaderboards_client.profiles == svc.profiles_client, "same profiles client")
+
+
+func test_analytics_wire_format_end_to_end() -> void:
+	var mock := SnapKitMockGateway.new()
+	var bodies := []
+	mock.route(HTTPClient.METHOD_PUT, "/v1/analytics/batch/user-events", func(req: Dictionary) -> Dictionary:
+		bodies.append(req)
+		return {"status": 200, "json": {"events_ingested": (req.body.data as Array).size(), "events_failed": 0}})
+	var svc := SnapKitService.new()   # real track(), not the spy
+	add_node(svc)
+	svc.start_with_config(mock_config())
+	svc.auth.session_path = temp_path("svc_wire_%d.json" % randi())
+	svc.use_mock_gateway(track_mock(mock))
+	await svc.boot_finished
+	svc.track("run_end", {"mode": "story", "result": "win", "score": 120, "duration_s": 3.0, "flag": true})
+	var res: Dictionary = await svc.analytics_client.flush()
+	check(res.ok, "flush ok")
+	check_eq(bodies.size(), 1, "one batch")
+	var body: Dictionary = bodies[0].body
+	check_eq(body.get("user_id"), svc.user_id(), "user_id in body = session user")
+	var seen := {}
+	for e in body.data:
+		seen[e.event] = e.properties
+		for k in e.properties:
+			check(e.properties[k] is String, "%s.%s is a string" % [e.event, k])
+	check_eq(seen.get("online_state", {}).get("online"), "1", "online flag as \"1\"")
+	check_eq(seen.get("run_end", {}), {"mode": "story", "result": "win", "score": "120",
+		"duration_s": "3", "flag": "1"}, "numbers/bools stringified")

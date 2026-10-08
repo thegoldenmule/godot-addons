@@ -31,7 +31,8 @@ extends Node
 ##   auth       = SnapKitAuth (child node)                core/snapkit_auth.gd
 ##   transport.setup(config, auth); auth.setup(config, transport)
 ##   stats_client         = SnapKitStats.new(transport)         clients/snapkit_stats.gd
-##   leaderboards_client  = SnapKitLeaderboards.new(transport)  clients/snapkit_leaderboards.gd
+##   leaderboards_client  = SnapKitLeaderboards.new(transport, profiles_client)
+##                                                              clients/snapkit_leaderboards.gd
 ##   storage_client       = SnapKitStorage.new(transport)       clients/snapkit_storage.gd
 ##   remote_config_client = SnapKitRemoteConfig.new(transport)  clients/snapkit_remote_config.gd
 ##   profiles_client      = SnapKitProfiles.new(transport)      clients/snapkit_profiles.gd
@@ -175,10 +176,11 @@ func start_with_config(cfg: SnapKitConfig) -> void:
 	auth.session_changed.connect(_on_session_changed)
 
 	stats_client = StatsScript.new(transport)
-	leaderboards_client = LeaderboardsScript.new(transport)
 	storage_client = StorageScript.new(transport)
 	remote_config_client = RemoteConfigScript.new(transport)
 	profiles_client = ProfilesScript.new(transport)
+	# Shares the profiles client so leaderboard entries resolve display names.
+	leaderboards_client = LeaderboardsScript.new(transport, profiles_client)
 	if config.quests_enabled():
 		quests_client = QuestsScript.new(transport)
 
@@ -407,9 +409,12 @@ func cloud_save_pull() -> Dictionary:
 
 
 ## Merge hook for cloud-save conflicts over the `data` maps. Override in the game
-## subclass to customize; the default is SnapKitCloudSave.default_merge.
+## subclass to customize; the default is SnapKitCloudSave.default_merge, with
+## scalar keys decided by which side changed last
+## (cloud_save.last_remote_is_newer, set just before this is called).
 func _merge(local: Dictionary, remote: Dictionary) -> Dictionary:
-	return CloudSaveScript.default_merge(local, remote)
+	var remote_is_newer := cloud_save.last_remote_is_newer if cloud_save != null else true
+	return CloudSaveScript.default_merge(local, remote, remote_is_newer)
 
 
 # ---- Analytics ---------------------------------------------------------------
