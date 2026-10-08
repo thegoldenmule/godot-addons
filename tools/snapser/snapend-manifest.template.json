@@ -1,0 +1,514 @@
+{
+  "version": "v1",
+  "id": "__SNAPEND_ID__",
+  "name": "__SNAPEND_NAME__",
+  "environment": "DEVELOPMENT",
+  "service_definitions": [
+    {
+      "id": "auth",
+      "language": "go",
+      "version": "v1.10.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "auth"
+          }
+        },
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "auth_settings"
+          }
+        },
+        {
+          "type": "REDIS",
+          "redis": {}
+        }
+      ]
+    },
+    {
+      "id": "statistics",
+      "language": "go",
+      "version": "v1.9.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "statistics_settings"
+          }
+        },
+        {
+          "type": "REDIS",
+          "redis": {}
+        },
+        {
+          "type": "COUCHBASE",
+          "couchbase": {}
+        }
+      ]
+    },
+    {
+      "id": "leaderboards",
+      "language": "go",
+      "version": "v1.8.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "leaderboards_settings"
+          }
+        },
+        {
+          "type": "REDIS",
+          "redis": {}
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "language": "go",
+      "version": "v1.9.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "storage_settings"
+          }
+        },
+        {
+          "type": "COUCHBASE",
+          "couchbase": {}
+        }
+      ]
+    },
+    {
+      "id": "profiles",
+      "language": "go",
+      "version": "v1.3.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "profiles"
+          }
+        },
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "profiles_settings"
+          }
+        },
+        {
+          "type": "REDIS",
+          "redis": {}
+        }
+      ]
+    },
+    {
+      "id": "analytics",
+      "language": "go",
+      "version": "v1.4.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "analytics"
+          }
+        },
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "analytics_settings"
+          }
+        }
+      ]
+    },
+    {
+      "id": "remote-config",
+      "language": "go",
+      "version": "v1.4.0",
+      "author_id": "snapser",
+      "category": "SNAPSER",
+      "subcategory": "SERVICE",
+      "data_dependencies": [
+        {
+          "type": "POSTGRES",
+          "postgres": {
+            "database": "remote_config_settings"
+          }
+        },
+        {
+          "type": "REDIS",
+          "redis": {}
+        }
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "id": "auth",
+      "data": {
+        "dev": {
+          "anon": {
+            "enabled": true
+          },
+          "api_keys": [],
+          "app_auth": null,
+          "app_verify": null,
+          "apple": null,
+          "disable_user_creation": false,
+          "discord": null,
+          "email": null,
+          "email_password": null,
+          "epic": null,
+          "facebook": null,
+          "fixed_rate_limiter_settings": [
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_login"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_verification"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "account_recovery"
+            }
+          ],
+          "google": null,
+          "password": null,
+          "session_inactivity_timeout": 604800,
+          "session_token_validity": 2592000,
+          "single_session_per_user": false,
+          "steam": null,
+          "user_auth_restrictions": [],
+          "username_password": null,
+          "x": null,
+          "xbox": null
+        },
+        "email_templates": [],
+        "prod": {
+          "anon": {
+            "enabled": true
+          },
+          "api_keys": [],
+          "app_auth": null,
+          "app_verify": null,
+          "apple": null,
+          "disable_user_creation": false,
+          "discord": null,
+          "email": null,
+          "email_password": null,
+          "epic": null,
+          "facebook": null,
+          "fixed_rate_limiter_settings": [
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_login"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_verification"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "account_recovery"
+            }
+          ],
+          "google": null,
+          "password": null,
+          "session_inactivity_timeout": 604800,
+          "session_token_validity": 2592000,
+          "single_session_per_user": false,
+          "steam": null,
+          "user_auth_restrictions": [],
+          "username_password": null,
+          "x": null,
+          "xbox": null
+        },
+        "stage": {
+          "anon": {
+            "enabled": true
+          },
+          "api_keys": [],
+          "app_auth": null,
+          "app_verify": null,
+          "apple": null,
+          "disable_user_creation": false,
+          "discord": null,
+          "email": null,
+          "email_password": null,
+          "epic": null,
+          "facebook": null,
+          "fixed_rate_limiter_settings": [
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_login"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "email_verification"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "account_recovery"
+            }
+          ],
+          "google": null,
+          "password": null,
+          "session_inactivity_timeout": 604800,
+          "session_token_validity": 2592000,
+          "single_session_per_user": false,
+          "steam": null,
+          "user_auth_restrictions": [],
+          "username_password": null,
+          "x": null,
+          "xbox": null
+        }
+      }
+    },
+    {
+      "id": "statistics",
+      "data": {
+        "quest_callback_statistics": [],
+        "segments": [],
+        "statistics": []
+      }
+    },
+    {
+      "id": "leaderboards",
+      "data": {
+        "leaderboards": []
+      }
+    },
+    {
+      "id": "storage",
+      "data": {
+        "keys": [
+          {
+            "access_type": "private",
+            "is_prefix_key": false,
+            "key": "save_v1",
+            "schema": {
+              "properties": {}
+            },
+            "scope": "external",
+            "storage_type": "json",
+            "strict_array_validation": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "profiles",
+      "data": {
+        "keys": [
+          {
+            "meta": [],
+            "name": "display_name",
+            "required": false,
+            "searchable_column": "secondary_5",
+            "searchable_type": "SECONDARY",
+            "type": "text",
+            "validations": {
+              "max": 0,
+              "max_length": 0,
+              "min": 0,
+              "min_length": 0,
+              "pattern": "",
+              "values": []
+            },
+            "visibility": "public",
+            "visibility_group": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "analytics",
+      "data": {
+        "events": [
+          {
+            "is_snap_event": false,
+            "name": "session_start",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "build_mode",
+                "type": "string"
+              },
+              {
+                "name": "version",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "is_snap_event": false,
+            "name": "session_end",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "duration_s",
+                "type": "number"
+              }
+            ]
+          },
+          {
+            "is_snap_event": false,
+            "name": "run_start",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "mode",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "is_snap_event": false,
+            "name": "run_end",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "mode",
+                "type": "string"
+              },
+              {
+                "name": "result",
+                "type": "string"
+              },
+              {
+                "name": "score",
+                "type": "number"
+              },
+              {
+                "name": "duration_s",
+                "type": "number"
+              }
+            ]
+          },
+          {
+            "is_snap_event": false,
+            "name": "screen_view",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "screen",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "is_snap_event": false,
+            "name": "online_state",
+            "type": "user",
+            "sample_rate": 100,
+            "properties": [
+              {
+                "name": "online",
+                "type": "number"
+              },
+              {
+                "name": "reason",
+                "type": "string"
+              }
+            ]
+          }
+        ],
+        "reports": []
+      }
+    },
+    {
+      "id": "remote-config",
+      "data": {
+        "app_configs": [
+          {
+            "base_value": {},
+            "copy_of": 0,
+            "is_current": true,
+            "revision": 0,
+            "schema": {
+              "properties": {}
+            },
+            "version": "v1"
+          }
+        ],
+        "base_config": {
+          "base_value": {},
+          "copy_of": 0,
+          "is_current": false,
+          "revision": 0,
+          "schema": {},
+          "updated_at": "0"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
