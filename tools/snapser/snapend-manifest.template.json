@@ -7,7 +7,7 @@
     {
       "id": "auth",
       "language": "go",
-      "version": "v1.10.0",
+      "version": "v1.14.1",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -33,7 +33,7 @@
     {
       "id": "statistics",
       "language": "go",
-      "version": "v1.9.0",
+      "version": "v1.13.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -57,7 +57,7 @@
     {
       "id": "leaderboards",
       "language": "go",
-      "version": "v1.8.0",
+      "version": "v1.12.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -77,7 +77,7 @@
     {
       "id": "storage",
       "language": "go",
-      "version": "v1.9.0",
+      "version": "v1.14.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -97,7 +97,7 @@
     {
       "id": "profiles",
       "language": "go",
-      "version": "v1.3.0",
+      "version": "v1.13.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -123,7 +123,7 @@
     {
       "id": "analytics",
       "language": "go",
-      "version": "v1.4.0",
+      "version": "v1.12.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -145,7 +145,7 @@
     {
       "id": "remote-config",
       "language": "go",
-      "version": "v1.4.0",
+      "version": "v1.13.0",
       "author_id": "snapser",
       "category": "SNAPSER",
       "subcategory": "SERVICE",
@@ -205,14 +205,33 @@
               "limit": 5,
               "lockout_duration_in_seconds": 60,
               "type": "account_recovery"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "change_email"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 300,
+              "limit": 5,
+              "lockout_duration_in_seconds": 600,
+              "type": "report_user"
             }
           ],
           "google": null,
           "password": null,
+          "processing_report_retention_seconds": 0,
+          "resolved_report_retention_seconds": 2592000,
           "session_inactivity_timeout": 604800,
           "session_token_validity": 2592000,
           "single_session_per_user": false,
           "steam": null,
+          "unprocessed_report_retention_seconds": 7776000,
           "user_auth_restrictions": [],
           "username_password": null,
           "x": null,
@@ -257,14 +276,33 @@
               "limit": 5,
               "lockout_duration_in_seconds": 60,
               "type": "account_recovery"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "change_email"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 300,
+              "limit": 5,
+              "lockout_duration_in_seconds": 600,
+              "type": "report_user"
             }
           ],
           "google": null,
           "password": null,
+          "processing_report_retention_seconds": 0,
+          "resolved_report_retention_seconds": 2592000,
           "session_inactivity_timeout": 604800,
           "session_token_validity": 2592000,
           "single_session_per_user": false,
           "steam": null,
+          "unprocessed_report_retention_seconds": 7776000,
           "user_auth_restrictions": [],
           "username_password": null,
           "x": null,
@@ -308,20 +346,41 @@
               "limit": 5,
               "lockout_duration_in_seconds": 60,
               "type": "account_recovery"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 60,
+              "limit": 5,
+              "lockout_duration_in_seconds": 60,
+              "type": "change_email"
+            },
+            {
+              "allow_list": [],
+              "deny_list": [],
+              "duration_in_seconds": 300,
+              "limit": 5,
+              "lockout_duration_in_seconds": 600,
+              "type": "report_user"
             }
           ],
           "google": null,
           "password": null,
+          "processing_report_retention_seconds": 0,
+          "resolved_report_retention_seconds": 2592000,
           "session_inactivity_timeout": 604800,
           "session_token_validity": 2592000,
           "single_session_per_user": false,
           "steam": null,
+          "unprocessed_report_retention_seconds": 7776000,
           "user_auth_restrictions": [],
           "username_password": null,
           "x": null,
           "xbox": null
         }
-      }
+      },
+      "version": "v1.14.1",
+      "exported_at": "1791492730"
     },
     {
       "id": "statistics",
@@ -329,13 +388,17 @@
         "quest_callback_statistics": [],
         "segments": [],
         "statistics": []
-      }
+      },
+      "version": "v1.13.0",
+      "exported_at": "1791492730"
     },
     {
       "id": "leaderboards",
       "data": {
         "leaderboards": []
-      }
+      },
+      "version": "v1.12.0",
+      "exported_at": "1791492730"
     },
     {
       "id": "storage",
@@ -353,7 +416,9 @@
             "strict_array_validation": false
           }
         ]
-      }
+      },
+      "version": "v1.14.0",
+      "exported_at": "1791492730"
     },
     {
       "id": "profiles",
@@ -363,12 +428,12 @@
             "meta": [],
             "name": "display_name",
             "required": false,
-            "searchable_column": "secondary_5",
-            "searchable_type": "SECONDARY",
+            "searchable_column": "",
+            "searchable_type": "NOT_SEARCHABLE",
             "type": "text",
             "validations": {
               "max": 0,
-              "max_length": 0,
+              "max_length": 32,
               "min": 0,
               "min_length": 0,
               "pattern": "",
@@ -378,7 +443,9 @@
             "visibility_group": ""
           }
         ]
-      }
+      },
+      "version": "v1.13.0",
+      "exported_at": "1791492730"
     },
     {
       "id": "analytics",
@@ -387,8 +454,6 @@
           {
             "is_snap_event": false,
             "name": "session_start",
-            "type": "user",
-            "sample_rate": 100,
             "properties": [
               {
                 "name": "build_mode",
@@ -402,37 +467,41 @@
                 "name": "platform",
                 "type": "string"
               }
-            ]
+            ],
+            "sample_rate": 100,
+            "type": "user"
           },
           {
             "is_snap_event": false,
-            "name": "session_end",
-            "type": "user",
-            "sample_rate": 100,
+            "name": "online_state",
             "properties": [
               {
-                "name": "duration_s",
+                "name": "online",
                 "type": "number"
-              }
-            ]
-          },
-          {
-            "is_snap_event": false,
-            "name": "run_start",
-            "type": "user",
-            "sample_rate": 100,
-            "properties": [
+              },
               {
-                "name": "mode",
+                "name": "reason",
                 "type": "string"
               }
-            ]
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": false,
+            "name": "screen_view",
+            "properties": [
+              {
+                "name": "screen",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
           },
           {
             "is_snap_event": false,
             "name": "run_end",
-            "type": "user",
-            "sample_rate": 100,
             "properties": [
               {
                 "name": "mode",
@@ -450,39 +519,460 @@
                 "name": "duration_s",
                 "type": "number"
               }
-            ]
+            ],
+            "sample_rate": 100,
+            "type": "user"
           },
           {
             "is_snap_event": false,
-            "name": "screen_view",
-            "type": "user",
-            "sample_rate": 100,
+            "name": "run_start",
             "properties": [
               {
-                "name": "screen",
+                "name": "mode",
                 "type": "string"
               }
-            ]
+            ],
+            "sample_rate": 100,
+            "type": "user"
           },
           {
             "is_snap_event": false,
-            "name": "online_state",
-            "type": "user",
-            "sample_rate": 100,
+            "name": "session_end",
             "properties": [
               {
-                "name": "online",
+                "name": "duration_s",
                 "type": "number"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_campaign_runs",
+            "properties": [
+              {
+                "name": "campaign_id",
+                "type": "number"
+              },
+              {
+                "name": "started_at",
+                "type": "timestamp"
+              },
+              {
+                "name": "ended_at",
+                "type": "timestamp"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "successes",
+                "type": "number"
+              },
+              {
+                "name": "failures",
+                "type": "number"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "app"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_notification_subscriptions",
+            "properties": [
+              {
+                "name": "channel",
+                "type": "number"
+              },
+              {
+                "name": "action",
+                "type": "string"
               },
               {
                 "name": "reason",
                 "type": "string"
               }
-            ]
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_campaign_notification_events",
+            "properties": [
+              {
+                "name": "campaign_id",
+                "type": "number"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "action",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_iap_purchases_v2",
+            "properties": [
+              {
+                "name": "bundle_name",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "quantity",
+                "type": "number"
+              },
+              {
+                "name": "price",
+                "type": "double"
+              },
+              {
+                "name": "currency",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_iap_purchases",
+            "properties": [
+              {
+                "name": "bundle_name",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "quantity",
+                "type": "number"
+              },
+              {
+                "name": "price",
+                "type": "number"
+              },
+              {
+                "name": "currency",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_advertisements",
+            "properties": [
+              {
+                "name": "type",
+                "type": "string"
+              },
+              {
+                "name": "action",
+                "type": "string"
+              },
+              {
+                "name": "placement",
+                "type": "string"
+              },
+              {
+                "name": "provider",
+                "type": "string"
+              },
+              {
+                "name": "failure_reason",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_errors",
+            "properties": [
+              {
+                "name": "error_message",
+                "type": "string"
+              },
+              {
+                "name": "error_ts",
+                "type": "timestamp"
+              },
+              {
+                "name": "severity",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_sessions",
+            "properties": [
+              {
+                "name": "action",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "device",
+                "type": "string"
+              },
+              {
+                "name": "location",
+                "type": "string"
+              },
+              {
+                "name": "agent",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_milestones",
+            "properties": [
+              {
+                "name": "milestone_name",
+                "type": "string"
+              },
+              {
+                "name": "milestone_date",
+                "type": "string"
+              },
+              {
+                "name": "milestone_ts",
+                "type": "timestamp"
+              },
+              {
+                "name": "milestone_step",
+                "type": "number"
+              },
+              {
+                "name": "client",
+                "type": "string"
+              },
+              {
+                "name": "server_ts",
+                "type": "timestamp"
+              },
+              {
+                "name": "client_ts",
+                "type": "timestamp"
+              },
+              {
+                "name": "category",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_payments",
+            "properties": [
+              {
+                "name": "txn_id",
+                "type": "string"
+              },
+              {
+                "name": "payment_method",
+                "type": "string"
+              },
+              {
+                "name": "currency_name",
+                "type": "string"
+              },
+              {
+                "name": "currency_value",
+                "type": "number"
+              },
+              {
+                "name": "value_usd",
+                "type": "number"
+              },
+              {
+                "name": "category",
+                "type": "string"
+              },
+              {
+                "name": "subcategory",
+                "type": "string"
+              },
+              {
+                "name": "server_ts",
+                "type": "number"
+              },
+              {
+                "name": "client_ts",
+                "type": "number"
+              },
+              {
+                "name": "status",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_economy",
+            "properties": [
+              {
+                "name": "currency_name",
+                "type": "string"
+              },
+              {
+                "name": "current_value",
+                "type": "number"
+              },
+              {
+                "name": "delta",
+                "type": "number"
+              },
+              {
+                "name": "direction",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_segments",
+            "properties": [
+              {
+                "name": "segment_name",
+                "type": "string"
+              },
+              {
+                "name": "direction",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_experiments",
+            "properties": [
+              {
+                "name": "experiment_name",
+                "type": "string"
+              },
+              {
+                "name": "variant_name",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_logins",
+            "properties": [
+              {
+                "name": "ip",
+                "type": "string"
+              },
+              {
+                "name": "location",
+                "type": "string"
+              },
+              {
+                "name": "device",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "agent",
+                "type": "string"
+              },
+              {
+                "name": "login_type",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
+          },
+          {
+            "is_snap_event": true,
+            "name": "snap_installs",
+            "properties": [
+              {
+                "name": "ip",
+                "type": "string"
+              },
+              {
+                "name": "location",
+                "type": "string"
+              },
+              {
+                "name": "device",
+                "type": "string"
+              },
+              {
+                "name": "platform",
+                "type": "string"
+              },
+              {
+                "name": "agent",
+                "type": "string"
+              },
+              {
+                "name": "login_type",
+                "type": "string"
+              }
+            ],
+            "sample_rate": 100,
+            "type": "user"
           }
         ],
-        "reports": []
-      }
+        "reports": [
+          {
+            "last_run_at": "0",
+            "name": "snap_dau",
+            "query": "select count(distinct user_id) as dau, platform, date_trunc('day', created_at) as day from user_snap_logins where created_at >= now() - interval '7 days' group by day, platform order by day desc;",
+            "recipients": [],
+            "results": "{}",
+            "run_interval": ""
+          }
+        ]
+      },
+      "version": "v1.12.0",
+      "exported_at": "1791492730"
     },
     {
       "id": "remote-config",
@@ -504,11 +994,12 @@
           "copy_of": 0,
           "is_current": false,
           "revision": 0,
-          "schema": {},
-          "updated_at": "0"
+          "schema": {}
         },
         "overrides": []
-      }
+      },
+      "version": "v1.13.0",
+      "exported_at": "1791492730"
     }
   ]
 }

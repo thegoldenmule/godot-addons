@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live smoke test of one game's DEVELOPMENT snapend using this repo's snapser_kit.
 #
-#   tools/snapser/smoke/run_smoke.sh <game repo or project dir | path to snapser_kit.config.json> [--board=<logical>] [--verbose]
+#   tools/snapser/smoke/run_smoke.sh <game repo or project dir | path to snapser_kit.config.json> [--stat=<declared key>] [--board=<logical>] [--verbose]
 #
 # The gateway comes ONLY from the game's committed snapser_kit.config.json
 # (looked up at <repo>/game/snapser_kit.config.json, then
