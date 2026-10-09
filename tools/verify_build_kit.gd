@@ -4,13 +4,15 @@ extends SceneTree
 ## failure classification, preset parsing, export-options generation, env
 ## parsing, teams parsing, helper-JSON parsing, a real spawn round-trip
 ## through exec.gd's log + exit-sentinel contract, and the iOS signing stages
-## (command lines + the .ipa entitlement check, end to end on macOS).
+## (command lines + the .ipa entitlement check, end to end on macOS), and the
+## one-command release CLI (cli/release_core.gd) with git and ASC mocked.
 ## Run: godot --headless --path . --script res://tools/verify_build_kit.gd
 
 const Exec := preload("res://addons/build_kit/exec.gd")
 const Classify := preload("res://addons/build_kit/classify.gd")
 const ServiceT := preload("res://addons/build_kit/build_kit_service.gd")
 const Itch := preload("res://addons/build_kit/itch.gd")
+const Release := preload("res://addons/build_kit/cli/release_core.gd")
 
 var _fails := 0
 
@@ -452,6 +454,7 @@ func _initialize() -> void:
 	_verify_itch()
 	_verify_itch_classify()
 	_verify_ios_signing()
+	_verify_release_cli()
 
 	print("VERIFY build_kit: %s" % ("PASS" if _fails == 0 else "FAIL (%d)" % _fails))
 	quit(0 if _fails == 0 else 1)
@@ -1038,3 +1041,259 @@ func _write(path: String, text: String) -> void:
 func _delete_dir(path: String) -> void:
 	if path.contains("build_kit_verify") and DirAccess.dir_exists_absolute(path):
 		OS.execute("rm", ["-rf", path])
+
+
+# --- release CLI (cli/release_core.gd) ---------------------------------------
+#
+# git and App Store Connect are mocked: GitMock answers by argv prefix and
+# records every call; ASC results are fed as the helper's JSON dicts. Nothing
+# here uploads, commits or pushes.
+
+class GitMock:
+	var calls: Array = []
+	var replies := {}  # argv-prefix -> Array of {code, output}; the last one repeats
+	var defaults := {}  # prefixes set by base(): the first on() replaces them
+
+	func base(prefix: String, code := 0, output := "") -> GitMock:
+		replies[prefix] = [{"code": code, "output": output}]
+		defaults[prefix] = true
+		return self
+
+	func on(prefix: String, code := 0, output := "") -> GitMock:
+		if defaults.has(prefix):
+			defaults.erase(prefix)
+			replies.erase(prefix)
+		if not replies.has(prefix):
+			replies[prefix] = []
+		replies[prefix].append({"code": code, "output": output})
+		return self
+
+	func run(args: PackedStringArray) -> Dictionary:
+		var line := " ".join(args)
+		calls.append(line)
+		var best := ""
+		for prefix in replies:
+			if line.begins_with(prefix) and prefix.length() > best.length():
+				best = prefix
+		if best == "":
+			return {"code": 0, "output": ""}
+		var queue: Array = replies[best]
+		return queue.pop_front() if queue.size() > 1 else queue[0]
+
+	func called(prefix: String) -> int:
+		return calls.filter(func(c): return str(c).begins_with(prefix)).size()
+
+
+func _no_force(calls: Array) -> bool:
+	for x in calls:
+		var line := str(x)
+		if line.contains("--force") or line.contains(" -f") or line.contains("+HEAD"):
+			return false
+	return true
+
+
+## A repo on main tracking origin/main, clean, nothing staged, not ahead.
+func _clean_git() -> GitMock:
+	return GitMock.new() \
+		.base("rev-parse --is-inside-work-tree", 0, "true\n") \
+		.base("symbolic-ref", 0, "main\n") \
+		.base("config --get branch.main.remote", 0, "origin\n") \
+		.base("config --get branch.main.merge", 0, "refs/heads/main\n") \
+		.base("rev-list --count", 0, "0\n") \
+		.base("rev-parse HEAD", 0, "abc123def4567890\n")
+
+
+func _verify_release_cli() -> void:
+	# argument parsing
+	var d := Release.parse_args(PackedStringArray())
+	_check("args: defaults upload+commit+push", d["ok"] and d["upload"] and d["commit"] and d["push"]
+		and d["project"] == "" and d["timeout_min"] == Release.DEFAULT_TIMEOUT_MIN and not d["help"], str(d))
+	var a := Release.parse_args(PackedStringArray(["--no-upload"]))
+	_check("args: --no-upload implies no commit/push", a["ok"] and not a["upload"] and not a["commit"] and not a["push"], str(a))
+	a = Release.parse_args(PackedStringArray(["--no-commit"]))
+	_check("args: --no-commit implies no push", a["ok"] and a["upload"] and not a["commit"] and not a["push"], str(a))
+	a = Release.parse_args(PackedStringArray(["--no-push"]))
+	_check("args: --no-push keeps the commit", a["ok"] and a["upload"] and a["commit"] and not a["push"], str(a))
+	a = Release.parse_args(PackedStringArray(["--project", "/tmp/game", "--timeout", "45"]))
+	_check("args: --project <dir> --timeout <n>", a["ok"] and a["project"] == "/tmp/game" and a["timeout_min"] == 45, str(a))
+	a = Release.parse_args(PackedStringArray(["--project=/tmp/g h", "--timeout=5"]))
+	_check("args: --flag=value form", a["ok"] and a["project"] == "/tmp/g h" and a["timeout_min"] == 5, str(a))
+	a = Release.parse_args(PackedStringArray(["--project"]))
+	_check("args: --project without value", not a["ok"] and str(a["error"]).contains("--project"), str(a))
+	a = Release.parse_args(PackedStringArray(["--project", "--no-push"]))
+	_check("args: --project doesn't swallow a flag", not a["ok"], str(a))
+	a = Release.parse_args(PackedStringArray(["--force"]))
+	_check("args: unknown flag rejected", not a["ok"] and str(a["error"]).contains("--force"), str(a))
+	a = Release.parse_args(PackedStringArray(["--timeout", "0"]))
+	_check("args: --timeout must be positive", not a["ok"], str(a))
+	a = Release.parse_args(PackedStringArray(["--timeout=soon"]))
+	_check("args: --timeout must be a number", not a["ok"], str(a))
+	a = Release.parse_args(PackedStringArray(["--no-push=1"]))
+	_check("args: switches take no value", not a["ok"], str(a))
+	a = Release.parse_args(PackedStringArray(["-h"]))
+	_check("args: -h", a["ok"] and a["help"], str(a))
+	_check("usage names the script path", Release.USAGE.contains("addons/build_kit/cli/release_ios.sh"))
+
+	# build-number selection
+	_check("build#: config ahead of ASC", Release.pick_build_number(9, 3) == 9)
+	_check("build#: uploaded-but-uncommitted bump is skipped", Release.pick_build_number(5, 7) == 8)
+	_check("build#: config == highest+1", Release.pick_build_number(5, 4) == 5)
+	_check("build#: config == highest", Release.pick_build_number(5, 5) == 6)
+	_check("build#: nothing on ASC", Release.pick_build_number(5, 0) == 5)
+	_check("build#: floor of 1", Release.pick_build_number(0, 0) == 1)
+	var asc_builds := [
+		{"version": "7", "state": "PROCESSING"}, {"version": "12", "state": "VALID"},
+		{"version": "1.0.3", "state": "VALID"}, {"version": "3", "state": "INVALID"}]
+	_check("build#: highest ignores non-integer versions", Release.highest_build(asc_builds) == 12)
+	_check("build#: highest of none", Release.highest_build([]) == 0)
+	_check("poll: state of a listed build", Release.build_state(asc_builds, 7) == "PROCESSING")
+	_check("poll: unlisted build", Release.build_state(asc_builds, 13) == "")
+	_check("poll: verdicts", Release.state_verdict("VALID") == "done" and Release.state_verdict("INVALID") == "failed"
+		and Release.state_verdict("FAILED") == "failed" and Release.state_verdict("PROCESSING") == "wait"
+		and Release.state_verdict("") == "wait")
+	var py := _sh("cd %s && python3 -B -c %s" % [Exec.quote(ProjectSettings.globalize_path("res://addons/build_kit")),
+		Exec.quote("import asc_helper as h; print(h.highest_build_number([{'version':'7'},{'version':'12'},{'version':'1.0.3'}]), h.highest_build_number([]))")])
+	_check("asc_helper highest_build_number", py[0] == 0 and str(py[1]).strip_edges() == "12 0", str(py))
+
+	# config write
+	var two_space := "{\n  \"ios\": {\n    \"preset\": \"iOS\",\n    \"build_number\": 7\n  },\n  \"android\": {\"version_code\": 3}\n}\n"
+	var w := Release.set_build_number_text(two_space, 8)
+	_check("config: in-place edit keeps formatting", w == two_space.replace("\"build_number\": 7", "\"build_number\": 8"), w)
+	w = Release.set_build_number_text("{\"ios\": {\"build_number\": 4.0}}", 5)
+	_check("config: float build_number rewritten as int", w == "{\"ios\": {\"build_number\": 5}}", w)
+	w = Release.set_build_number_text("{\"itch\": {\"user\": \"u\"}}", 2)
+	var wp: Variant = JSON.parse_string(w)
+	_check("config: missing ios section added", wp is Dictionary and int(wp["ios"]["build_number"]) == 2
+		and wp["itch"]["user"] == "u" and not wp.has("android"), w)
+	w = Release.set_build_number_text("{\"ios\": {\"build_number\": 4}, \"x\": {\"build_number\": 9}}", 5)
+	wp = JSON.parse_string(w)
+	_check("config: an unrelated build_number survives", wp is Dictionary and int(wp["ios"]["build_number"]) == 5
+		and int(wp["x"]["build_number"]) == 9, w)
+	_check("config: empty file", JSON.parse_string(Release.set_build_number_text("", 3))["ios"]["build_number"] == 3)
+	_check("config: invalid JSON refused", Release.set_build_number_text("not json", 3) == "")
+	var tmp_dir := OS.get_temp_dir().path_join("build_kit_verify_release_%d" % Time.get_ticks_usec())
+	DirAccess.make_dir_recursive_absolute(tmp_dir)
+	var cfg_path := tmp_dir.path_join("build_kit.config.json")
+	_write(cfg_path, "{\n\t\"ios\": {\n\t\t\"preset\": \"iOS\",\n\t\t\"build_number\": 41\n\t}\n}\n")
+	var wr := Release.write_build_number(cfg_path, 42)
+	_check("config: write_build_number on disk", wr["ok"] and FileAccess.get_file_as_string(cfg_path)
+		== "{\n\t\"ios\": {\n\t\t\"preset\": \"iOS\",\n\t\t\"build_number\": 42\n\t}\n}\n", FileAccess.get_file_as_string(cfg_path))
+	_write(cfg_path, "[1, 2]")
+	_check("config: write refuses a non-object", not Release.write_build_number(cfg_path, 2)["ok"]
+		and FileAccess.get_file_as_string(cfg_path) == "[1, 2]")
+	_delete_dir(tmp_dir)
+
+	# commit message
+	var msg := Release.commit_message("1.4", 42, 43)
+	_check("commit message format", msg == "build: iOS 1.4 (42) uploaded to TestFlight; next build_number 43", msg)
+	_check("commit message has no trailers", not msg.contains("\n") and not msg.to_lower().contains("co-authored"))
+
+	# git preflight
+	var g := _clean_git()
+	var pre := Release.git_preflight(g.run, true)
+	_check("git preflight: clean repo with upstream", pre["ok"] and pre["remote"] == "origin"
+		and pre["merge"] == "refs/heads/main" and pre["branch"] == "main", str(pre))
+	g = _clean_git().on("diff --cached --name-only", 0, "src/main.gd\n")
+	pre = Release.git_preflight(g.run, true)
+	_check("git preflight: refuses other staged changes", not pre["ok"] and str(pre["error"]).contains("src/main.gd"), str(pre))
+	g = _clean_git().on("status --porcelain", 0, " M build_kit.config.json\n")
+	_check("git preflight: refuses a locally modified config", not Release.git_preflight(g.run, true)["ok"])
+	g = _clean_git().on("status --porcelain", 0, "?? build_kit.config.json\n")
+	_check("git preflight: untracked config is fine", Release.git_preflight(g.run, true)["ok"])
+	g = _clean_git().on("symbolic-ref", 1, "")
+	_check("git preflight: detached HEAD refused when pushing", not Release.git_preflight(g.run, true)["ok"])
+	_check("git preflight: detached HEAD fine with --no-push", Release.git_preflight(g.run, false)["ok"])
+	g = _clean_git().on("config --get branch.main.remote", 1, "")
+	pre = Release.git_preflight(g.run, true)
+	_check("git preflight: no upstream", not pre["ok"] and str(pre["error"]).contains("upstream"), str(pre))
+	g = _clean_git().on("rev-list --count", 0, "2\n")
+	pre = Release.git_preflight(g.run, true)
+	_check("git preflight: ahead of upstream refused", not pre["ok"] and str(pre["error"]).contains("ahead"), str(pre))
+	g = _clean_git().on("rev-parse --is-inside-work-tree", 128, "fatal: not a git repository")
+	_check("git preflight: not a repo", not Release.git_preflight(g.run, false)["ok"])
+
+	# git commit + push
+	var upstream := {"remote": "origin", "merge": "refs/heads/main"}
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n")
+	var c := Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: commit + push ok", c["ok"] and c["pushed"] and not c["rebased"] and c["sha"] == "abc123def4567890", str(c))
+	_check("git: adds ONLY the config", g.called("add -- build_kit.config.json") == 1 and g.called("add") == 1, str(g.calls))
+	_check("git: commits with the message, pathspec-limited",
+		g.calls.has("commit -q -m %s -- build_kit.config.json" % msg), str(g.calls))
+	_check("git: pushes HEAD to the upstream branch", g.calls.has("push origin HEAD:refs/heads/main"), str(g.calls))
+	_check("git: never forces", _no_force(g.calls), str(g.calls))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n")
+	c = Release.git_commit_and_push(g.run, msg, false, upstream)
+	_check("git: --no-push commits without pushing", c["ok"] and not c["pushed"] and g.called("push") == 0, str(g.calls))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "other.gd\n")
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: refuses when something else is staged", not c["ok"] and g.called("add") == 0 and g.called("commit") == 0, str(c))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\nsneaky.gd\n")
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: refuses + unstages when add staged more than the config", not c["ok"] and g.called("commit") == 0
+		and g.called("reset -q -- build_kit.config.json") == 1, str(g.calls))
+
+	var rejected := " ! [rejected]        HEAD -> main (fetch first)\nerror: failed to push some refs\n"
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n") \
+		.on("push", 1, rejected).on("push", 0, "") \
+		.on("rev-parse HEAD", 0, "abc123def4567890\n").on("rev-parse HEAD", 0, "fedcba9876543210\n")
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: rejected push → fetch, rebase only the release commit, retry", c["ok"] and c["pushed"] and c["rebased"]
+		and c["sha"] == "fedcba9876543210" and g.called("fetch -q origin") == 1
+		and g.called("rebase -q --autostash --onto @{u} HEAD~1") == 1 and g.called("push") == 2, str(g.calls))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n") \
+		.on("push", 1, rejected)
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: retries only once, then fails (no force)", not c["ok"] and g.called("push") == 2
+		and _no_force(g.calls), str(g.calls))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n") \
+		.on("push", 1, rejected).on("rebase -q", 1, "CONFLICT (content): Merge conflict in build_kit.config.json")
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: rebase conflict aborts and leaves the commit local", not c["ok"] and g.called("rebase --abort") == 1
+		and g.called("push") == 1 and c["sha"] != "", str(g.calls))
+
+	g = _clean_git().on("diff --cached --name-only", 0, "").on("diff --cached --name-only", 0, "build_kit.config.json\n") \
+		.on("push", 128, "fatal: Could not read from remote repository.")
+	c = Release.git_commit_and_push(g.run, msg, true, upstream)
+	_check("git: non-rejection push failure isn't retried", not c["ok"] and g.called("push") == 1 and g.called("fetch") == 0, str(g.calls))
+
+	# cleanup selection, redaction, summary
+	var victims := Release.cleanup_entries(["logs", "old.txt", "Game"],
+		["logs", "old.txt", "Game", "Game.xcodeproj", "Game.ipa", "Game.xcarchive"],
+		["Game", "Game.xcodeproj", "Game.xcarchive", "Game.ipa"], [])
+	_check("cleanup: new + known outputs, never logs or foreign files",
+		victims == ["Game", "Game.ipa", "Game.xcarchive", "Game.xcodeproj"], str(victims))
+	victims = Release.cleanup_entries([], ["logs", "Game.ipa", "Game"], ["Game", "Game.ipa"], ["Game.ipa"])
+	_check("cleanup: --no-upload keeps the .ipa", victims == ["Game"], str(victims))
+	_check("cleanup: refuses a project root", Release.cleanup_entries([], ["project.godot", "Game"], ["Game"], []).is_empty())
+	_check("redact", Release.redact("key K1234 at /x/AuthKey.p8, issuer abcd-1", ["K1234", "/x/AuthKey.p8", "abcd-1", ""])
+		== "key <redacted> at <redacted>, issuer <redacted>")
+	var summary := Release.summary_line(true, "1.4", "42", "VALID", "verified", "abc123def456")
+	_check("summary line", summary == "release_ios: OK  version=1.4 build=42 asc=VALID entitlements=verified commit=abc123def456", summary)
+
+	# version + preset
+	_check("marketing version from preset", ServiceT.marketing_version({"short_version": "2.1"}, "1.0") == "2.1")
+	_check("marketing version falls back to project", ServiceT.marketing_version({"short_version": ""}, "1.3") == "1.3")
+	var sv := ServiceT.parse_preset_text(PRESET_FIXTURE.replace("application/export_project_only=true",
+		"application/export_project_only=true\napplication/short_version=\"3.2\""), "iOS")
+	_check("preset short_version parsed", sv.get("short_version", "") == "3.2", str(sv))
+
+	# the shipped entry point: executable, and wired to the runner (usage paths
+	# only — they exit before any service, ASC or git work)
+	var sh := ProjectSettings.globalize_path("res://addons/build_kit/cli/release_ios.sh")
+	_check("release_ios.sh is executable", _sh("test -x %s" % Exec.quote(sh))[0] == 0)
+	if OS.get_name() == "macOS" or OS.get_name() == "Linux":
+		var env := "GODOT=%s " % Exec.quote(OS.get_executable_path())
+		var r := _sh(env + Exec.quote(sh) + " --help")
+		_check("release_ios.sh --help", r[0] == 0 and str(r[1]).contains("--no-upload"), str(r))
+		r = _sh(env + Exec.quote(sh) + " --bogus")
+		_check("release_ios.sh rejects unknown flags (exit 2)", r[0] == 2 and str(r[1]).contains("--bogus"), str(r))
+		r = _sh(env + Exec.quote(sh) + " --project /nonexistent/build_kit_verify")
+		_check("release_ios.sh needs a project.godot", r[0] == 2 and str(r[1]).contains("project.godot"), str(r))
+		r = _sh("GODOT=/nonexistent/godot " + Exec.quote(sh) + " --help")
+		_check("release_ios.sh reports a missing Godot", r[0] == 2 and str(r[1]).contains("GODOT"), str(r))

@@ -11,6 +11,7 @@ line that starts with '{'.
 Usage:
   asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I check-app <bundle_id>
   asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I builds <bundle_id>
+  asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I [--app-version V] build-numbers <bundle_id>
 """
 import argparse
 import base64
@@ -21,6 +22,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 API = "https://api.appstoreconnect.apple.com"
@@ -127,6 +129,33 @@ def app_builds(token: str, app_id: str) -> list:
     ]
 
 
+def version_builds(token: str, app_id: str, app_version: str) -> list:
+    """Up to 200 most recent builds of an app, optionally only those of one
+    marketing version (CFBundleShortVersionString). Build numbers only have to
+    be unique within a version, so that is the set the CLI picks from."""
+    path = (
+        "/v1/builds?filter[app]="
+        + app_id
+        + "&sort=-uploadedDate&limit=200&fields[builds]=version,processingState,uploadedDate"
+    )
+    if app_version:
+        path += "&filter[preReleaseVersion.version]=" + urllib.parse.quote(app_version, safe="")
+    data = get(token, path)
+    return [
+        {
+            "version": b["attributes"]["version"],
+            "state": b["attributes"]["processingState"],
+            "uploaded": b["attributes"].get("uploadedDate"),
+        }
+        for b in data.get("data", [])
+    ]
+
+
+def highest_build_number(builds: list) -> int:
+    """The highest all-digit build number; anything else (e.g. "1.0.3") is ignored."""
+    return max((int(b["version"]) for b in builds if str(b.get("version", "")).isdigit()), default=0)
+
+
 def uploaded_at(build: dict) -> datetime.datetime:
     """Sort key for a build's uploadedDate; offsets differ, so don't compare strings."""
     try:
@@ -140,7 +169,8 @@ def main() -> None:
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--issuer-id", required=True)
-    parser.add_argument("command", choices=["check-app", "builds", "ensure-bundle-id", "team-info"])
+    parser.add_argument("--app-version", default="")
+    parser.add_argument("command", choices=["check-app", "builds", "build-numbers", "ensure-bundle-id", "team-info"])
     parser.add_argument("arg")
     args = parser.parse_args()
     try:
@@ -209,6 +239,24 @@ def main() -> None:
                 if found and (not builds or uploaded_at(found[0]) > uploaded_at(builds[0])):
                     app_id, builds = a["id"], found
             print(json.dumps({"ok": True, "found": True, "app_id": app_id, "builds": builds}))
+        elif args.command == "build-numbers":
+            # Every build of the version across all exact-match app records
+            # (ghost duplicates contribute nothing), plus the highest number:
+            # the release CLI picks max(config, highest + 1) and polls the
+            # uploaded build's processingState from the same list.
+            apps = find_apps(token, args.arg)
+            if not apps:
+                print(json.dumps({"ok": True, "found": False, "highest": 0, "builds": []}))
+                return
+            app_id, newest, builds = apps[0]["id"], None, []
+            for a in apps:
+                found = version_builds(token, a["id"], args.app_version)
+                if found and (newest is None or uploaded_at(found[0]) > uploaded_at(newest)):
+                    app_id, newest = a["id"], found[0]
+                builds.extend(found)
+            print(json.dumps({"ok": True, "found": True, "app_id": app_id,
+                              "app_version": args.app_version,
+                              "highest": highest_build_number(builds), "builds": builds}))
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:300]
         print(json.dumps({"ok": False, "error": "HTTP %d: %s" % (e.code, body)}))

@@ -50,6 +50,7 @@ var _stage_def := {}             # the full stage dict currently running (post_c
 var _active_platform := ""       # platform owning the current build ("" = idle)
 var _proc := {}                  # active Exec.spawn handle (+offset)
 var _upload := false
+var _build_number := 0           # CFBundleVersion of the running iOS build
 var _context := {}               # bundle_id / team_id for classify + guidance
 var _preset := {}                # parsed iOS preset (cached at build start)
 
@@ -377,8 +378,17 @@ static func parse_preset_text(text: String, platform: String, preset_name := "")
 			out["bundle_id"] = str(cfg.get_value(opt, "application/bundle_identifier", ""))
 			out["team_id"] = str(cfg.get_value(opt, "application/app_store_team_id", ""))
 			out["export_project_only"] = bool(cfg.get_value(opt, "application/export_project_only", false))
+			out["short_version"] = str(cfg.get_value(opt, "application/short_version", "")).strip_edges()
 		return out
 	return {}
+
+
+## The iOS marketing version (CFBundleShortVersionString) a build will carry:
+## the preset's application/short_version, else the project's
+## application/config/version (Godot's own fallback). "" when neither is set.
+static func marketing_version(preset: Dictionary, project_version: String) -> String:
+	var v := str(preset.get("short_version", "")).strip_edges()
+	return v if v != "" else project_version.strip_edges()
 
 
 func load_preset(platform: String) -> Dictionary:
@@ -653,7 +663,10 @@ func current_stage() -> String:
 
 
 ## upload=true → TestFlight; upload=false → signed .ipa left in the build dir.
-func start_build(upload := true) -> Dictionary:
+## build_number > 0 overrides the config's ios.build_number for this build (the
+## CLI picks max(config, highest on App Store Connect + 1)); a successful upload
+## then saves build_number + 1 either way.
+func start_build(upload := true, build_number := 0) -> Dictionary:
 	if is_busy():
 		return err("A build is already running (stage: %s)." % _stage)
 	load_config()
@@ -667,7 +680,9 @@ func start_build(upload := true) -> Dictionary:
 
 	var root := ProjectSettings.globalize_path("res://")
 	var paths := derive_paths(root, _preset["export_path"], "iOS")
-	var build_number := int(config["ios"].get("build_number", 1))
+	if build_number <= 0:
+		build_number = int(config["ios"].get("build_number", 1))
+	_build_number = build_number
 	_context = {"bundle_id": _preset["bundle_id"], "team_id": _preset["team_id"],
 		"key_id": str(asc_credentials()["key_id"])}
 	_upload = upload
@@ -781,7 +796,7 @@ func _next_stage(paths: Dictionary = {}) -> void:
 		if _active_platform == "ios":
 			var was_upload := _upload
 			if was_upload:
-				config["ios"]["build_number"] = int(config["ios"].get("build_number", 1)) + 1
+				config["ios"]["build_number"] = _build_number + 1
 				save_config()
 			_finish({
 				"ok": true,
@@ -2320,7 +2335,9 @@ func _fix_android_preset() -> Dictionary:
 	return ok({"message": ", ".join(msgs) if not msgs.is_empty() else "nothing to fix"})
 
 
-func _spawn_asc(command: String, bundle_id: String, log_name: String) -> Dictionary:
+## `extra` = optional helper flags (e.g. --app-version for build-numbers).
+func _spawn_asc(command: String, bundle_id: String, log_name: String,
+		extra: PackedStringArray = PackedStringArray()) -> Dictionary:
 	var c := asc_credentials()
 	var helper := ProjectSettings.globalize_path(
 		get_script().resource_path.get_base_dir().path_join("asc_helper.py"))
@@ -2328,8 +2345,8 @@ func _spawn_asc(command: String, bundle_id: String, log_name: String) -> Diction
 	return Exec.spawn_logged(PackedStringArray([
 		"python3", "-B", helper,
 		"--key-path", c["key_path"], "--key-id", c["key_id"], "--issuer-id", c["issuer_id"],
-		command, bundle_id,
-	]), OS.get_cache_dir().path_join("build_kit").path_join(log_name))
+	]) + extra + PackedStringArray([command, bundle_id]),
+		OS.get_cache_dir().path_join("build_kit").path_join(log_name))
 
 
 static func _parse_helper_json(log_text: String) -> Dictionary:

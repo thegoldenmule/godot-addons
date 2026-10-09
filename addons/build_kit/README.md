@@ -55,6 +55,84 @@ Known failures (missing app record, signing conflicts, expired sessions, …)
 are classified into plain-language guidance rather than raw xcodebuild logs —
 see `classify.gd`.
 
+### One-command release (CLI, 0.3.0+)
+
+The whole TestFlight release, build-number commit included, from a terminal
+(or an agent) with no editor open:
+
+```sh
+addons/build_kit/cli/release_ios.sh                 # from the project root
+addons/build_kit/cli/release_ios.sh --project path/to/godot-project --no-push
+```
+
+```
+release_ios.sh [--project <dir>] [--no-upload] [--no-commit] [--no-push] [--timeout <minutes>]
+```
+
+| Flag | Effect |
+|---|---|
+| `--project <dir>` | the directory holding `project.godot`; default: the project this addon is vendored in (`addons/build_kit/cli` → three levels up) |
+| `--no-upload` | stop after the verified local `.ipa` (kept); no App Store Connect, commit or push |
+| `--no-commit` | upload, write the next `build_number`, but leave it uncommitted (implies `--no-push`) |
+| `--no-push` | commit locally, don't push |
+| `--timeout <min>` | how long to wait for App Store Connect processing (default 30) |
+
+Godot comes from `$GODOT`, else `/Applications/Godot.app/Contents/MacOS/Godot`.
+The script runs `cli/release_ios.gd` headless, which drives this addon's own
+`BuildKitService` (the same stages as the dock), in order:
+
+1. **Preflight** — iOS preset present; an App Store Connect API key (needed to
+   pick the build number and watch processing); and, unless `--no-commit`, a
+   git work tree with **nothing staged**, `build_kit.config.json` not locally
+   modified, and (unless `--no-push`) a branch with an upstream it isn't
+   ahead of — so the push carries only the release commit. Checked *before*
+   building, so it never uploads something it then can't record.
+2. **Build number** — `max(ios.build_number, highest build of this version on
+   App Store Connect + 1)` (`asc_helper.py build-numbers`). An upload whose
+   bump never got committed is skipped over instead of colliding. The version
+   is the preset's `application/short_version`, else
+   `application/config/version`.
+3. **export → patch → archive → embed_entitlements → export_ipa →
+   verify_entitlements → upload** — the pipeline above; a missing
+   entitlement fails here, before anything is uploaded.
+4. **Record** — writes `ios.build_number = uploaded + 1` into
+   `build_kit.config.json` (only that value changes; the file's formatting is
+   kept), `git add`s **only** that file and commits it as
+   `build: iOS <version> (<build>) uploaded to TestFlight; next build_number <n>`
+   (no trailers), then pushes to the branch's upstream. A rejected push gets
+   one `git fetch` + rebase of just that commit and one retry; it never
+   force-pushes. This runs as soon as the upload succeeds, so the number is
+   recorded even if processing later fails or times out.
+5. **Processing** — polls App Store Connect every 30 s until the build is
+   `VALID`; `FAILED`/`INVALID` or the timeout fails the run (the build stays
+   uploaded and recorded).
+6. **Cleanup** — removes the build outputs it created (Xcode project, archive,
+   `.ipa`, check files) and keeps `logs/` next to them.
+
+Output is one line per stage plus a final summary, e.g.
+
+```
+[verify_entitlements] ok — 4s
+[upload] ok — 95s
+[config] ok — build_kit.config.json build_number → 43
+[commit] ok — 1a2b3c4d5e6f
+[push] ok — origin/main
+[processing] ok — build 42 is VALID (ready to test) after 610s
+release_ios: OK  version=1.0 build=42 asc=VALID entitlements=verified commit=1a2b3c4d5e6f
+```
+
+Exit status: `0` success, `1` any failed stage, `2` usage error. Credentials
+use the same resolution as the dock (process env → `.env`) and are never
+printed: the stage command lines (which carry API-key flags) stay in the
+logs, and everything echoed is redacted.
+
+**Claude Code** — allow exactly this script, so an agent can cut a release
+without blanket shell access (`.claude/settings.json` → `permissions.allow`):
+
+```
+Bash(*addons/build_kit/cli/release_ios.sh*)
+```
+
 ### Android
 
 **Preflight** — a second checklist for the Android toolchain: the Android SDK
@@ -247,7 +325,8 @@ path inside the project.
 
 `android.version_code` isn't read or written by anything yet — it's a home
 for the Play Console upload path to auto-bump, the same way `build_number`
-bumps on every TestFlight upload, once that pipeline exists.
+bumps on every TestFlight upload, once that pipeline exists. (The dock's
+upload saves the bump; `cli/release_ios.sh` also commits and pushes it.)
 
 ```sh
 # .env — written for you when you drop the .p8 / save the Issuer ID
@@ -289,6 +368,9 @@ registers it on first archive).
 | `classify.gd` | failure signatures → plain-language guidance |
 | `itch.gd` | itch.io helpers (static): channel discovery, butler args/URLs, status parsing, HTML5 bundle limits, the `itch.*` preflight rows |
 | `asc_helper.py` | App Store Connect API probe (stdlib-only; ES256 via openssl) |
+| `cli/release_ios.sh` | one-command iOS release entry point (stable path — see the permission rule above) |
+| `cli/release_ios.gd` | the headless runner it launches: drives `BuildKitService`, ASC, git |
+| `cli/release_core.gd` | the runner's pure halves: args, build-number pick, config write, commit message, git commit/push |
 | `dock.gd` | the bottom-panel view |
 
 Headless check (from the repo root):
