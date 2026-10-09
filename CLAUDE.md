@@ -127,6 +127,10 @@ runner's archive-path map + traversal guard) are covered by
 
 Bump `version` in the addon's `plugin.cfg`, commit, push to `main`. Done.
 
+**Work directly on `main`.** No feature branches or PRs unless asked: when a
+change is finished and verified (verifier passes, secret grep clean), commit it
+and push to `main` yourself — don't leave it uncommitted or ask first.
+
 ## Docs (`wiki/`) are emitted, never hand-edited
 
 `wiki/**` is a read-only projection of the `godot-addons` Hotseat workspace

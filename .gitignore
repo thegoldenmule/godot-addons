@@ -6,6 +6,9 @@ export_presets.cfg
 # OS
 .DS_Store
 
+# Python bytecode (asc_helper.py is run with python3, which writes a cache dir)
+__pycache__/
+
 # Self-update staging (only ever written into a consuming project's user://).
 # editor_tool_kit is the package manager — it stages every addon's update here,
 # so there is one staging dir regardless of how many addons are managed.

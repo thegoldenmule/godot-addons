@@ -124,7 +124,17 @@ static func read_from(log_path: String, offset: int) -> Dictionary:
 		return {"text": "", "offset": offset}
 	f.seek(offset)
 	var bytes := f.get_buffer(length - offset)
-	return {"text": bytes.get_string_from_utf8(), "offset": length}
+	return {"text": strip_ansi(bytes.get_string_from_utf8()), "offset": length}
+
+
+## Drops ANSI escape sequences (colour/bold codes Godot's own --headless
+## export prints even into a file) so the log panel shows plain text.
+static func strip_ansi(text: String) -> String:
+	if text.find(char(27)) == -1:
+		return text
+	var re := RegEx.new()
+	re.compile("\\x1b\\[[0-9;?]*[ -/]*[@-~]")
+	return re.sub(text, "", true)
 
 
 static func read_all(log_path: String) -> String:

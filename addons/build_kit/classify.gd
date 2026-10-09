@@ -8,10 +8,16 @@ extends RefCounted
 ## log output.
 ##
 ## Rules are ordered most-specific-first; classify() returns the first match
-## whose `platforms` includes the caller's platform ("ios"/"android"; absent
-## `platforms` = both — most rules are platform-neutral or the platform is
-## implied by the failure signature itself). `context` may carry bundle_id /
-## team_id, spliced into the guidance text.
+## whose `platforms` includes the caller's platform ("ios"/"android"/"itch";
+## absent `platforms` = every platform — only the Godot-export rules are
+## unscoped, since every target runs a Godot export). `context` may carry
+## bundle_id / team_id, spliced into the guidance text.
+##
+## The itch (butler) rules sit last and are itch-only: scoped rules for other
+## platforms never see an itch log (so android's bare "unauthorized" can't
+## catch butler output), and none of the unscoped export rules' patterns occur
+## in butler output. Within them, channel beats game (a spec error mentions
+## both) and explicit page errors beat butler_auth's bare 401/403.
 
 
 static func rules() -> Array:
@@ -166,6 +172,45 @@ static func rules() -> Array:
 			"title": "Java SDK not configured",
 			"guidance": "See the Java SDK preflight row (it has a Fix when a JDK is found via JAVA_HOME or Android Studio's bundled runtime).",
 			"platforms": ["android"],
+		},
+		{
+			"id": "butler_missing",
+			"patterns": ["command not found: butler", "butler: command not found", "butler: not found", "'butler' is not recognized", "zsh: no such file or directory:", "zsh: permission denied:"],
+			"title": "butler isn't installed (or isn't runnable)",
+			"guidance": "See the butler row in the itch.io preflight — its Fix downloads butler from itch.io into the editor's data folder. Then press the build button again.",
+			"links": [{"label": "Installing butler", "url": "https://itch.io/docs/butler/installing.html"}],
+			"platforms": ["itch"],
+		},
+		{
+			"id": "butler_invalid_channel",
+			"patterns": ["missing channel", "invalid channel"],
+			"title": "itch.io rejected the channel name",
+			"guidance": "Channel names are lower-case letters, digits and dashes (e.g. html5, windows, mac, linux). Edit itch.channels in build_kit.config.json (or remove the entry to fall back to auto-discovery), then press the build button again.",
+			"links": [{"label": "Channel names", "url": "https://itch.io/docs/butler/pushing.html#channel-names"}],
+			"platforms": ["itch"],
+		},
+		{
+			"id": "butler_invalid_game",
+			"patterns": ["invalid target", "invalid game", "invalid spec:", "invalid user"],
+			"title": "itch.io doesn't know this game page",
+			"guidance": "1. The target is <user>/<game>: user = your itch.io subdomain, game = the page's URL slug (not its title) — re-paste the page URL in the itch.io preflight row\n2. The page must already exist — butler never creates one (drafts are fine)\n3. If both are right, the API key may belong to another account or have expired: generate a fresh key (or re-run `butler login`).",
+			"links": [{"label": "Create new project", "url": "https://itch.io/game/new"}, {"label": "Dashboard", "url": "https://itch.io/dashboard"}],
+			"platforms": ["itch"],
+		},
+		{
+			"id": "butler_auth",
+			"patterns": ["invalid key", "invalid api key", "No credentials and stdin is not a terminal", "Please set BUTLER_API_KEY", "API error (401)", "API error (403)", "HTTP 401", "HTTP 403"],
+			"title": "itch.io rejected the API key",
+			"guidance": "1. ↗ Open API keys → Generate new API key, copy it\n2. Paste it into the key field on the itch.io account row → Save (replaces BUTLER_API_KEY in .env — make sure no spaces came along)\n3. Or run `butler login` once in a terminal (BUTLER_API_KEY, if set, still takes priority).",
+			"links": [{"label": "Open API keys", "url": "https://itch.io/user/settings/api-keys"}],
+			"platforms": ["itch"],
+		},
+		{
+			"id": "butler_network",
+			"patterns": ["no such host", "connection refused", "connection reset", "network is unreachable", "i/o timeout", "TLS handshake timeout", "Client.Timeout exceeded", "Server error: HTTP 5", "timed out"],
+			"title": "Network problem talking to itch.io",
+			"guidance": "Transient or a firewall blocking butler — check connectivity and press the build button again. butler only re-uploads what changed, so a retry is cheap.",
+			"platforms": ["itch"],
 		},
 	]
 

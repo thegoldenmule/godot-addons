@@ -11,7 +11,9 @@ extends "res://addons/editor_tool_kit/tool_service.gd"
 ## 2. PIPELINE — the staged build: Godot headless export (project-only) →
 ##    Info.plist patch (encryption-exempt + build number) → xcodebuild archive
 ##    (automatic signing) → xcodebuild -exportArchive (destination: upload →
-##    TestFlight, or export → local .ipa).
+##    TestFlight, or export → local .ipa). Android exports a debug APK and adb
+##    installs it; itch.io exports every configured channel (Web/Windows/macOS/
+##    Linux presets) into a staging dir and `butler push`es each one.
 ##
 ## Every external command runs detached (exec.gd) with its output tailed from a
 ## log file — nothing blocks the editor thread and the pipeline is cancellable.
@@ -19,10 +21,11 @@ extends "res://addons/editor_tool_kit/tool_service.gd"
 ##
 ## Project-specific state lives OUTSIDE the addon (self-update overwrites this
 ## folder): res://build_kit.config.json for shared settings (committed) and the
-## repo .env for ASC_* credentials (gitignored, never committed).
+## repo .env for ASC_* / BUTLER_API_KEY credentials (gitignored, never committed).
 
 const Exec := preload("res://addons/build_kit/exec.gd")
 const Classify := preload("res://addons/build_kit/classify.gd")
+const Itch := preload("res://addons/build_kit/itch.gd")
 
 const CONFIG_PATH := "res://build_kit.config.json"
 
@@ -39,8 +42,9 @@ signal build_finished(result: Dictionary, platform: String)
 var config := {}
 var preflight_rows: Array = []
 
-var _stages: Array = []          # queued {name, shell} dicts
+var _stages: Array = []          # queued {name, shell, [log, env, post_check, dir]} dicts
 var _stage := ""                 # current stage name ("" = idle)
+var _stage_def := {}             # the full stage dict currently running (post_check etc.)
 var _active_platform := ""       # platform owning the current build ("" = idle)
 var _proc := {}                  # active Exec.spawn handle (+offset)
 var _upload := false
@@ -52,6 +56,10 @@ var _asc_phase := "team"         # "team" = key validation → chains into "app"
 var _asc_started_ms := 0
 var _builds_proc := {}           # async TestFlight-status probe
 var _fix_proc := {}              # async preflight fix (templates download/install)
+var _itch_proc := {}             # async `butler status` probe (preflight + itch status button)
+var _itch_started_ms := 0
+var _login_proc := {}            # async `butler login` (browser sign-in), polled by _poll_butler_login
+var _itch_build := {}            # {mode, user, game, channels, out_root, html5, threads, userversion}
 
 
 func _ready() -> void:
@@ -63,6 +71,8 @@ func _process(_delta: float) -> void:
 	_poll_asc()
 	_poll_builds()
 	_poll_fix()
+	_poll_itch()
+	_poll_butler_login()
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -79,6 +89,16 @@ static func default_config() -> Dictionary:
 		"android": {
 			"preset": "Android",
 			"version_code": 1,
+		},
+		# user/game = the itch.io page (https://<user>.itch.io/<game>). channels
+		# empty = auto-discover from export presets (Web→html5, Windows
+		# Desktop→windows, macOS→mac, Linux→linux); entries are
+		# {"preset", "channel", "enabled"}.
+		"itch": {
+			"user": "",
+			"game": "",
+			"output_dir": "build/itch",
+			"channels": [],
 		},
 	}
 
@@ -125,11 +145,7 @@ func asc_credentials() -> Dictionary:
 		"issuer_id": str(ios.get("asc_issuer_id", "")),
 		"key_path": str(ios.get("asc_key_path", "")),
 	}
-	var env := {}
-	for env_path in ENV_PATHS:
-		if FileAccess.file_exists(env_path):
-			var f := FileAccess.open(env_path, FileAccess.READ)
-			env.merge(parse_env(f.get_as_text()))
+	var env := read_dotenv()
 	if creds["key_id"] == "":
 		creds["key_id"] = OS.get_environment("ASC_KEY_ID")
 		if creds["key_id"] == "":
@@ -145,6 +161,39 @@ func asc_credentials() -> Dictionary:
 	if creds["key_path"].begins_with("~"):
 		creds["key_path"] = OS.get_environment("HOME") + creds["key_path"].substr(1)
 	return creds
+
+
+## Every candidate .env merged, first file winning per key (ENV_PATHS order).
+func read_dotenv() -> Dictionary:
+	var env := {}
+	for env_path in ENV_PATHS:
+		if FileAccess.file_exists(env_path):
+			var f := FileAccess.open(env_path, FileAccess.READ)
+			if f != null:
+				env.merge(parse_env(f.get_as_text()))
+	return env
+
+
+## A secret by name: the editor's process environment first, then the .env.
+func env_secret(name: String) -> String:
+	var value := OS.get_environment(name).strip_edges()
+	if value != "":
+		return value
+	return str(read_dotenv().get(name, "")).strip_edges()
+
+
+## The butler API key and where it came from: "env" (the editor's own
+## environment — children inherit it, nothing to inject), "dotenv" (the repo
+## .env — injected into butler's env per stage), or "" (none; butler may still
+## be logged in via its creds file, see _butler_creds_path()).
+func butler_key() -> Dictionary:
+	var from_env := OS.get_environment("BUTLER_API_KEY").strip_edges()
+	if from_env != "":
+		return {"key": from_env, "source": "env"}
+	var from_file := str(read_dotenv().get("BUTLER_API_KEY", "")).strip_edges()
+	if from_file != "":
+		return {"key": from_file, "source": "dotenv"}
+	return {"key": "", "source": ""}
 
 
 func has_asc_key() -> bool:
@@ -548,8 +597,13 @@ func _auth_flags() -> PackedStringArray:
 	])
 
 
+## Stage dicts: {name, shell} plus optional `log` (log-path override — itch
+## stages log per channel under the staging dir), `env` (Dictionary injected
+## into the child's environment only, see _spawn_with_env — the shell line is
+## echoed to the log, so secrets travel here, never on it) and `post_check`
+## (a check run in _poll_pipeline after a zero exit, e.g. "web_bundle").
 func _next_stage(paths: Dictionary = {}) -> void:
-	if paths.is_empty():
+	if paths.is_empty() and _active_platform != "itch":
 		var root := ProjectSettings.globalize_path("res://")
 		paths = derive_paths(root, _preset["export_path"], "iOS" if _active_platform == "ios" else "Android")
 	if _stages.is_empty():
@@ -568,19 +622,43 @@ func _next_stage(paths: Dictionary = {}) -> void:
 					{"label": "TestFlight for iPhone", "url": "https://apps.apple.com/app/testflight/id899247664"},
 				] if was_upload else []),
 			})
+		elif _active_platform == "itch":
+			_finish(_itch_success_result())
 		else:
 			_finish({"ok": true, "title": "Installed on device",
 				"guidance": "The APK is installed — check the device."})
 		return
 	var stage: Dictionary = _stages.pop_front()
 	_stage = stage["name"]
-	var handle := Exec.spawn_shell(stage["shell"], paths["logs"].path_join(_stage + ".log"))
+	_stage_def = stage
+	var log_path := str(stage.get("log", ""))
+	if log_path == "":
+		log_path = paths["logs"].path_join(_stage + ".log")
+	var handle := _spawn_with_env(stage["shell"], log_path, stage.get("env", {}))
 	if not handle["ok"]:
 		_finish({"ok": false, "stage": _stage, "title": "Spawn failed", "guidance": str(handle["error"])})
 		return
 	_proc = handle
 	log_line.emit("\n── %s ──\n$ %s\n" % [_stage, stage["shell"]], _active_platform)
 	stage_changed.emit(_stage, _active_platform)
+
+
+## Exec.spawn_shell with `env` visible to the child only: the vars are set on
+## the editor process just long enough for OS.create_process to copy the
+## environment, then restored (or unset) — so a secret never sits in the
+## editor's env afterwards and never appears in the (echoed) shell line.
+func _spawn_with_env(shell: String, log_path: String, env: Dictionary) -> Dictionary:
+	var saved := {}
+	for name in env:
+		saved[name] = [OS.has_environment(name), OS.get_environment(name)]
+		OS.set_environment(name, str(env[name]))
+	var handle := Exec.spawn_shell(shell, log_path)
+	for name in saved:
+		if saved[name][0]:
+			OS.set_environment(name, saved[name][1])
+		else:
+			OS.unset_environment(name)
+	return handle
 
 
 ## Godot's Android export can exit 0 while only WARNING that apksigner is
@@ -623,6 +701,17 @@ func _poll_pipeline() -> void:
 				"guidance": "Godot's export succeeded but couldn't sign the APK (%s). See the Android SDK preflight row — apksigner ships in the SDK's build-tools." % warning,
 				"log": log_path})
 			return
+	if code == 0 and str(_stage_def.get("post_check", "")) == "web_bundle":
+		var violations := Itch.web_bundle_violations(_list_files(str(_stage_def.get("dir", ""))))
+		if not violations.is_empty():
+			_stages = []
+			_finish({"ok": false, "stage": _stage, "title": "Web build breaks itch.io's HTML5 limits",
+				"guidance": "itch.io won't serve this bundle in the browser:\n- %s\nNeeds index.html at the top level, ≤%d files, each ≤%d MB, ≤%d MB in total. Trim the exported assets (Project → Export → Resources filters) and build again." % [
+					"\n- ".join(violations), Itch.WEB_MAX_FILES,
+					int(Itch.WEB_MAX_FILE_BYTES / 1048576.0), int(Itch.WEB_MAX_TOTAL_BYTES / 1048576.0)],
+				"links": [{"label": "itch.io HTML5 docs", "url": "https://itch.io/docs/creators/html5"}],
+				"log": log_path})
+			return
 	if code == 0:
 		_next_stage()
 		return
@@ -637,8 +726,10 @@ func _poll_pipeline() -> void:
 func _finish(result: Dictionary) -> void:
 	var platform := _active_platform
 	_stage = ""
+	_stage_def = {}
 	_active_platform = ""
 	_proc = {}
+	_itch_build = {}
 	build_finished.emit(result, platform)
 	if result.get("ok", false):
 		log_line.emit("\n✓ %s\n%s\n" % [result.get("title", ""), result.get("guidance", "")], platform)
@@ -727,6 +818,821 @@ func _poll_builds() -> void:
 			"links": links}, "ios")
 
 
+# ── itch.io ───────────────────────────────────────────────────────────────────
+#
+# Export every enabled channel (Web/Windows/macOS/Linux presets) into
+# <project>/<itch.output_dir>/<channel>/, then `butler push` each dir to
+# <user>/<game>:<channel>. The pure halves (channel resolution, path/arg
+# building, status interpretation, the per-row verdicts) live in itch.gd; this
+# section only does the I/O around them. BUTLER_API_KEY never goes on a
+# command line — the shell line is echoed to the log — it rides the stage's
+# `env` instead (see _spawn_with_env).
+
+const ITCH_MODES := ["push", "dry_run", "export"]
+const ITCH_STATUS_TIMEOUT_MS := 60000
+const BUTLER_LOGIN_TIMEOUT_MS := 300000  # time to click through itch.io's approve page
+
+
+## Where Fix installs butler: outside the project (and outside the vendored
+## addon, which self-update overwrites), shared by every project on the machine.
+func butler_managed_dir() -> String:
+	return OS.get_data_dir().path_join("build_kit").path_join("butler")
+
+
+## butler, in order: the copy Fix installed → the itch desktop app's own copy
+## → `butler` on the login shell's PATH. "" when none is found.
+func resolve_butler_path() -> String:
+	var managed := butler_managed_dir().path_join(Itch.butler_exe_name(OS.get_name()))
+	if FileAccess.file_exists(managed):
+		return managed
+	var app_copy := itch_app_butler_path()
+	if app_copy != "":
+		return app_copy
+	var probe: Dictionary = Exec.run(PackedStringArray(["where", "butler"]) if OS.get_name() == "Windows"
+		else PackedStringArray(["command", "-v", "butler"]))
+	if int(probe["code"]) != 0:
+		return ""
+	var found := str(probe["output"]).strip_edges().split("\n")[0].strip_edges()
+	# `command -v` prints the path for a binary; anything else (an alias, a
+	# function) still runs when invoked by name.
+	return found if found.is_absolute_path() else "butler"
+
+
+## The itch desktop app keeps its own butler under broth/butler/versions/<v>/,
+## with the active version named in broth/butler/.chosen-version.
+static func itch_app_butler_path() -> String:
+	var base := pick_by_os(OS.get_name(),
+		OS.get_environment("APPDATA").path_join("itch"),
+		OS.get_environment("HOME").path_join(".config/itch"),
+		OS.get_environment("HOME").path_join("Library/Application Support/itch"))
+	var broth := base.path_join("broth").path_join("butler")
+	var chosen := broth.path_join(".chosen-version")
+	if not FileAccess.file_exists(chosen):
+		return ""
+	var f := FileAccess.open(chosen, FileAccess.READ)
+	if f == null:
+		return ""
+	var ver := f.get_as_text().strip_edges()
+	if ver == "" or ver.contains("/") or ver.contains("\\") or ver.contains(".."):
+		return ""
+	var exe := broth.path_join("versions").path_join(ver).path_join(Itch.butler_exe_name(OS.get_name()))
+	return exe if FileAccess.file_exists(exe) else ""
+
+
+func _butler_download_channel() -> String:
+	return Itch.butler_broth_channel(OS.get_name(), Engine.get_architecture_name())
+
+
+## The credentials file `butler login` writes — butler reads it itself, so a
+## logged-in machine needs no BUTLER_API_KEY at all.
+func _butler_creds_path() -> String:
+	return Itch.butler_creds_path(OS.get_name(), OS.get_environment("HOME"), OS.get_environment("USERPROFILE"))
+
+
+func _has_butler_credentials() -> bool:
+	return str(butler_key()["source"]) != "" or FileAccess.file_exists(_butler_creds_path())
+
+
+## Only a .env key needs injecting: a process-env key is inherited by every
+## child already, and the creds file is read by butler itself.
+func _butler_env() -> Dictionary:
+	var key := butler_key()
+	if str(key["source"]) == "dotenv":
+		return {"BUTLER_API_KEY": str(key["key"])}
+	return {}
+
+
+static func _read_export_presets() -> String:
+	if not FileAccess.file_exists("res://export_presets.cfg"):
+		return ""
+	var f := FileAccess.open("res://export_presets.cfg", FileAccess.READ)
+	return f.get_as_text() if f != null else ""
+
+
+func _itch_config() -> Dictionary:
+	var itch: Variant = config.get("itch", {})
+	return itch if itch is Dictionary else {}
+
+
+## Every channel itch.gd resolves (configured, or discovered from presets when
+## none are configured), enabled or not, with any `problem` attached.
+func _itch_resolved() -> Array:
+	var configured: Variant = _itch_config().get("channels", [])
+	return Itch.resolve_channels(configured if configured is Array else [],
+		Itch.list_presets(_read_export_presets()))
+
+
+## The enabled channels — the dock's channel picker.
+func itch_channels() -> Array:
+	if config.is_empty():
+		load_config()
+	return _itch_resolved().filter(func(c): return bool(c.get("enabled", false)))
+
+
+## mode: "push" (export + butler push), "dry_run" (export + butler push
+## --dry-run) or "export" (export only — no itch target/credentials needed).
+## only_channel limits the run to one channel ("" = every enabled channel).
+func start_build_itch(mode := "push", only_channel := "") -> Dictionary:
+	if is_busy():
+		return err("A build is already running (stage: %s)." % _stage)
+	if not ITCH_MODES.has(mode):
+		return err("Unknown itch build mode '%s' (push, dry_run or export)." % mode)
+	load_config()
+	var itch := _itch_config()
+	var user := str(itch.get("user", "")).strip_edges()
+	var game := str(itch.get("game", "")).strip_edges()
+	var pushing := mode != "export"
+	if pushing and not (Itch.valid_slug(user) and Itch.valid_slug(game)):
+		return err("Set the itch.io target first — paste the game's URL (https://you.itch.io/game) on the itch target row.")
+	var output_dir := str(itch.get("output_dir", "build/itch")).strip_edges()
+	if not Itch.safe_output_dir(output_dir):
+		return err("itch.output_dir '%s' in %s must be a relative path inside the project (no '..')." % [output_dir, CONFIG_PATH])
+	var channels: Array = _itch_resolved().filter(func(c): return bool(c.get("enabled", false)))
+	if only_channel != "":
+		channels = channels.filter(func(c): return str(c.get("channel", "")) == only_channel)
+		if channels.is_empty():
+			return err("No enabled itch channel '%s' — Refresh preflight." % only_channel)
+	if channels.is_empty():
+		return err("No itch channels to build — see the channels row (its Fix discovers them from your export presets).")
+	var problems := PackedStringArray()
+	for c in channels:
+		if str(c.get("problem", "")) != "":
+			problems.append("%s: %s" % [c.get("channel", "?"), c["problem"]])
+	if not problems.is_empty():
+		return err("Fix the itch channels first — " + "; ".join(problems))
+	var butler := ""
+	var env := {}
+	if pushing:
+		butler = resolve_butler_path()
+		if butler == "":
+			return err("butler isn't installed — press Fix on the butler row.")
+		# A real push needs credentials; --dry-run doesn't (it only reports).
+		if mode == "push" and not _has_butler_credentials():
+			return err("No itch.io credentials — save an API key on the itch.io account row (or run `butler login` once).")
+		env = _butler_env()
+
+	var root := ProjectSettings.globalize_path("res://")
+	var staged := _prepare_itch_staging(root, output_dir, channels, clean_app_name())
+	if not staged["ok"]:
+		return err(str(staged["error"]))
+	var userversion := str(ProjectSettings.get_setting("application/config/version", "")).strip_edges()
+	var exports: Array = []
+	var pushes: Array = []
+	var names: Array = []
+	var web := ""
+	var threads := false
+	for c in channels:
+		var channel := str(c["channel"])
+		var paths: Dictionary = staged["paths"][channel]
+		names.append(channel)
+		var export_stage := {
+			"name": "export_" + channel,
+			"shell": Exec.command_line(PackedStringArray([
+				OS.get_executable_path(), "--headless", "--path", root,
+				"--export-release", str(c["preset"]), str(paths["out"]),
+			])),
+			"log": str(paths["logs"]).path_join("export_%s.log" % channel),
+			"dir": str(paths["dir"]),
+		}
+		if str(c.get("platform", "")) == "Web":
+			export_stage["post_check"] = "web_bundle"
+			if web == "":
+				web = channel
+			var options: Dictionary = c.get("options", {})
+			threads = threads or str(options.get("variant/thread_support", false)).to_lower() == "true"
+		exports.append(export_stage)
+		if pushing:
+			pushes.append({
+				"name": "push_" + channel,
+				"shell": Exec.command_line(Itch.butler_push_args(butler, str(paths["dir"]), user, game,
+					channel, userversion, mode == "dry_run", true)),
+				"log": str(paths["logs"]).path_join("push_%s.log" % channel),
+				"env": env,
+			})
+
+	_context = {"user": user, "game": game, "target": "%s/%s" % [user, game]}
+	_itch_build = {"mode": mode, "user": user, "game": game, "channels": names,
+		"out_root": str(staged["out_root"]), "web": web, "threads": threads, "userversion": userversion}
+	_active_platform = "itch"
+	# Every export runs before any push, so a broken platform never leaves
+	# itch with half a release.
+	_stages = exports + pushes
+	var total := _stages.size()
+	log_line.emit("itch: %s %s → %s\n" % [mode, ", ".join(PackedStringArray(names)),
+		("%s/%s" % [user, game]) if pushing else str(staged["out_root"])], _active_platform)
+	_next_stage()
+	return ok({"stages": total, "channels": names})
+
+
+## Creates <project>/<output_dir>/ (with a .gdignore so the editor never
+## imports the exports, and a .gitignore of "*" so they never get committed),
+## then empties each channel dir — butler pushes a dir verbatim, so stale files
+## from an earlier export must not ride along. Deletion is refused for
+## anything not strictly inside the output dir.
+func _prepare_itch_staging(root: String, output_dir: String, channels: Array, app: String) -> Dictionary:
+	var project := root.simplify_path().rstrip("/")
+	var out_root := project.path_join(output_dir).simplify_path().rstrip("/")
+	if not Itch.safe_output_dir(output_dir) or not out_root.begins_with(project + "/"):
+		return {"ok": false, "error": "itch.output_dir '%s' must be inside the project." % output_dir}
+	var top := out_root.trim_prefix(project + "/").get_slice("/", 0)
+	if top in ["addons", ".godot", ".git"]:
+		return {"ok": false, "error": "itch.output_dir '%s' can't live under %s/ — pick a dedicated dir like build/itch." % [output_dir, top]}
+	DirAccess.make_dir_recursive_absolute(out_root)
+	if not _write_text(out_root.path_join(".gdignore"), "") or not _write_text(out_root.path_join(".gitignore"), "*\n"):
+		return {"ok": false, "error": "Cannot write to %s." % out_root}
+	var by_channel := {}
+	for c in channels:
+		var channel := str(c["channel"])
+		var paths := Itch.channel_paths(root, output_dir, channel, str(c.get("platform", "")),
+			str(c.get("export_path", "")), app)
+		var dir := str(paths["dir"]).simplify_path().rstrip("/")
+		var logs := str(paths["logs"]).simplify_path().rstrip("/")
+		if not dir.begins_with(out_root + "/") or dir == logs or logs.begins_with(dir + "/"):
+			return {"ok": false, "error": "Refusing to clean %s — channel dirs must sit inside %s, apart from logs/." % [dir, out_root]}
+		if DirAccess.dir_exists_absolute(dir):
+			var failure := _delete_tree(dir, out_root)
+			if failure != "":
+				return {"ok": false, "error": "Couldn't clear the old %s build: %s" % [channel, failure]}
+		DirAccess.make_dir_recursive_absolute(dir)
+		DirAccess.make_dir_recursive_absolute(logs)
+		by_channel[channel] = paths
+	return {"ok": true, "error": "", "out_root": out_root, "paths": by_channel}
+
+
+static func _write_text(path: String, text: String) -> bool:
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(text)
+	f.close()
+	return true
+
+
+## Recursive delete of `path`, refused unless it sits strictly inside `guard`.
+## Never follows a symlink (the link itself is removed, not its target).
+## Returns "" on success, else what failed.
+static func _delete_tree(path: String, guard: String) -> String:
+	path = path.simplify_path().rstrip("/")
+	guard = guard.simplify_path().rstrip("/")
+	if guard == "" or not path.begins_with(guard + "/"):
+		return "refusing to delete %s (outside %s)" % [path, guard]
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return "cannot open %s" % path
+	dir.include_hidden = true
+	for name in dir.get_files():
+		if dir.remove(name) != OK:
+			return "cannot delete %s" % path.path_join(name)
+	for name in dir.get_directories():
+		if dir.is_link(name):
+			if dir.remove(name) != OK:
+				return "cannot delete %s" % path.path_join(name)
+			continue
+		var failure := _delete_tree(path.path_join(name), guard)
+		if failure != "":
+			return failure
+	if DirAccess.remove_absolute(path) != OK:
+		return "cannot delete %s" % path
+	return ""
+
+
+## Every file under root_dir as [{path (relative to root_dir), size}] — the
+## input Itch.web_bundle_violations() checks. Symlinked dirs aren't followed.
+static func _list_files(root_dir: String, rel := "") -> Array:
+	var out: Array = []
+	if root_dir == "":
+		return out
+	var here := root_dir.path_join(rel) if rel != "" else root_dir
+	var dir := DirAccess.open(here)
+	if dir == null:
+		return out
+	dir.include_hidden = true
+	for name in dir.get_files():
+		var f := FileAccess.open(here.path_join(name), FileAccess.READ)
+		out.append({"path": rel.path_join(name) if rel != "" else name,
+			"size": f.get_length() if f != null else 0})
+	for name in dir.get_directories():
+		if dir.is_link(name):
+			continue
+		out.append_array(_list_files(root_dir, rel.path_join(name) if rel != "" else name))
+	return out
+
+
+func _itch_success_result() -> Dictionary:
+	var b := _itch_build
+	var user := str(b.get("user", ""))
+	var game := str(b.get("game", ""))
+	var channel_list: Array = b.get("channels", [])
+	var names := PackedStringArray(channel_list)
+	var links := [
+		{"label": "Open game page", "url": Itch.game_url(user, game)},
+		{"label": "itch.io dashboard", "url": Itch.DASHBOARD_URL},
+	]
+	match str(b.get("mode", "push")):
+		"export":
+			return {"ok": true, "title": "Exported %d channel(s)" % names.size(),
+				"guidance": "Nothing was uploaded. The builds are in %s (one folder per channel: %s)." % [
+					b.get("out_root", ""), ", ".join(names)]}
+		"dry_run":
+			return {"ok": true, "title": "Dry run finished — %d channel(s)" % names.size(),
+				"guidance": "butler showed what it would push to %s/%s (see the log above); nothing was uploaded." % [user, game],
+				"links": links}
+	var lines := PackedStringArray([
+		"itch.io processes each push for a minute or two — press 'itch status' to confirm it's live."])
+	var userversion := str(b.get("userversion", ""))
+	if userversion != "":
+		lines.append("Version: %s" % userversion)
+	else:
+		lines.append("No application/config/version set — itch shows butler's build number instead (see the version row).")
+	var web := str(b.get("web", ""))
+	if web != "":
+		var w := int(ProjectSettings.get_setting("display/window/size/viewport_width", 1152))
+		var h := int(ProjectSettings.get_setting("display/window/size/viewport_height", 648))
+		lines.append("First HTML5 push only — ↗ dashboard → your game → Edit game:")
+		lines.append("1. Kind of project: HTML")
+		lines.append("2. On the %s upload, tick \"This file will be played in the browser\"" % web)
+		lines.append("3. Embed options → viewport %d × %d (your project's window size)" % [w, h])
+		if bool(b.get("threads", false)):
+			lines.append("4. Tick \"SharedArrayBuffer support\" — this build uses threads and won't start without it")
+		lines.append("Save. Later pushes to the channel replace the build in place.")
+	return {"ok": true, "title": "Pushed %d channel(s) to itch.io" % names.size(),
+		"guidance": "\n".join(lines), "links": links}
+
+
+# ── itch.io status (async `butler status`) ────────────────────────────────────
+
+## The 'itch status' button. Reports through build_finished(…, "itch") — on
+## every async exit path — and also refreshes the auth/target preflight rows.
+func check_itch_status() -> Dictionary:
+	load_config()
+	var itch := _itch_config()
+	var user := str(itch.get("user", "")).strip_edges()
+	var game := str(itch.get("game", "")).strip_edges()
+	if not (Itch.valid_slug(user) and Itch.valid_slug(game)):
+		return err("Set the itch.io target first (see the itch target row).")
+	if not _itch_proc.is_empty():
+		if str(_itch_proc.get("user", "")) == user and str(_itch_proc.get("game", "")) == game:
+			# A preflight probe for the same target is already in flight — let
+			# it report instead of racing a second one.
+			_itch_proc["report"] = true
+			log_line.emit("\n── itch status ──\n", "itch")
+			return ok()
+		return err("Already checking.")
+	var butler := resolve_butler_path()
+	if butler == "":
+		return err("butler isn't installed — press Fix on the butler row.")
+	if not _has_butler_credentials():
+		return err("No itch.io credentials — save an API key on the itch.io account row (or run `butler login` once).")
+	var handle := _spawn_itch_status(butler, user, game, true)
+	if not handle.get("ok", false):
+		return err(str(handle.get("error", "spawn failed")))
+	log_line.emit("\n── itch status ──\n$ %s\n" % handle["shell"], "itch")
+	return ok()
+
+
+## "Sign in with browser" on the itch.io account row: runs `butler login`, which
+## opens itch.io's approve page in the browser and saves its key to butler's
+## creds file once you approve. Reports via build_finished(…, "itch").
+func start_butler_login() -> Dictionary:
+	if not _login_proc.is_empty():
+		return err("Already waiting for the itch.io sign-in in your browser.")
+	var butler := resolve_butler_path()
+	if butler == "":
+		return err("butler isn't installed — press Fix on the butler row.")
+	var shell := Exec.command_line(Itch.butler_login_args(butler, OS.get_name()))
+	var handle := Exec.spawn_shell(shell, OS.get_cache_dir().path_join("build_kit").path_join("butler_login.log"))
+	if not handle.get("ok", false):
+		return err(str(handle.get("error", "spawn failed")))
+	handle["offset"] = 0
+	handle["started_ms"] = Time.get_ticks_msec()
+	_login_proc = handle
+	log_line.emit("\n── butler login ──\n$ %s\n" % shell, "itch")
+	_set_row("itch.auth", "busy", "waiting for you to approve butler in the browser…", "", [], false)
+	return ok({"message": "Opening itch.io in your browser — approve butler there."})
+
+
+func _poll_butler_login() -> void:
+	if _login_proc.is_empty():
+		return
+	var tail: Dictionary = Exec.read_from(_login_proc["log"], int(_login_proc["offset"]))
+	if str(tail["text"]) != "":
+		_login_proc["offset"] = tail["offset"]
+		# script's pseudo-terminal ends lines with \r\n.
+		log_line.emit(str(tail["text"]).replace("\r", ""), "itch")
+	var code := Exec.exit_code(_login_proc["exit_path"])
+	if code < 0:
+		if Time.get_ticks_msec() - int(_login_proc["started_ms"]) > BUTLER_LOGIN_TIMEOUT_MS:
+			Exec.kill_tree(int(_login_proc["pid"]))
+			_login_proc = {}
+			build_finished.emit({"ok": false, "title": "itch.io sign-in timed out",
+				"guidance": "Nothing was approved within %d minutes. Press Sign in with browser to try again." % int(BUTLER_LOGIN_TIMEOUT_MS / 60000.0)}, "itch")
+			refresh_preflight()
+		return
+	_login_proc = {}
+	if code == 0 and FileAccess.file_exists(_butler_creds_path()):
+		var guidance := "butler saved its credentials to %s — every project on this machine can push now." % _butler_creds_path()
+		if str(butler_key()["source"]) != "":
+			guidance += "\nBUTLER_API_KEY is still set (%s) and takes priority over these credentials — remove it to use the sign-in." % (
+				".env" if str(butler_key()["source"]) == "dotenv" else "process environment")
+		build_finished.emit({"ok": true, "title": "Signed in to itch.io", "guidance": guidance}, "itch")
+	else:
+		build_finished.emit({"ok": false, "title": "butler login didn't finish (exit %d)" % code,
+			"guidance": "See the log above. Press Sign in with browser to try again, or paste an API key instead."}, "itch")
+	refresh_preflight()
+
+
+func _spawn_itch_status(butler: String, user: String, game: String, report: bool) -> Dictionary:
+	var shell := Exec.command_line(Itch.butler_status_args(butler, user, game))
+	var handle := _spawn_with_env(shell,
+		OS.get_cache_dir().path_join("build_kit").path_join("itch_status.log"), _butler_env())
+	if handle.get("ok", false):
+		handle["shell"] = shell
+		handle["user"] = user
+		handle["game"] = game
+		handle["report"] = report
+		_itch_proc = handle
+		_itch_started_ms = Time.get_ticks_msec()
+	return handle
+
+
+func _poll_itch() -> void:
+	if _itch_proc.is_empty():
+		return
+	var proc := _itch_proc
+	var code := Exec.exit_code(proc["exit_path"])
+	if code < 0:
+		if Time.get_ticks_msec() - _itch_started_ms > ITCH_STATUS_TIMEOUT_MS:
+			Exec.kill_tree(int(proc["pid"]))
+			_itch_proc = {}
+			var timed_out := {"status": "warn", "detail": "check timed out",
+				"guidance": "butler couldn't reach itch.io within %d s — check the network, then Refresh to retry." % int(ITCH_STATUS_TIMEOUT_MS / 1000.0)}
+			_set_itch_row("itch.auth", timed_out)
+			_set_itch_row("itch.target", timed_out)
+			if bool(proc.get("report", false)):
+				build_finished.emit({"ok": false, "title": "itch status check timed out",
+					"guidance": str(timed_out["guidance"])}, "itch")
+		return
+	_itch_proc = {}
+	var output := Exec.read_all(proc["log"])
+	var verdict := Itch.interpret_status(code, output)
+	_set_itch_row("itch.auth", verdict.get("auth", {}))
+	# Keep the configured target visible whatever the verdict says about it.
+	var target_verdict: Dictionary = verdict.get("target", {}).duplicate()
+	var slug := "%s/%s" % [proc["user"], proc["game"]]
+	if not str(target_verdict.get("detail", "")).contains(slug):
+		target_verdict["detail"] = "%s — %s" % [slug, target_verdict.get("detail", "")]
+	_set_itch_row("itch.target", target_verdict)
+	if bool(proc.get("report", false)):
+		_report_itch_status(code, output, verdict, str(proc["user"]), str(proc["game"]))
+
+
+## Applies an interpret_status() verdict to a row, keeping the row's own links
+## when the verdict brings none (the API-keys / new-game links stay useful).
+func _set_itch_row(id: String, verdict: Dictionary) -> void:
+	var links: Array = verdict.get("links", [])
+	if links.is_empty():
+		for row in preflight_rows:
+			if row["id"] == id:
+				links = row.get("links", [])
+	_set_row(id, str(verdict.get("status", "warn")), str(verdict.get("detail", "")),
+		str(verdict.get("guidance", "")), links, bool(verdict.get("fixable", false)))
+
+
+func _report_itch_status(code: int, output: String, verdict: Dictionary, user: String, game: String) -> void:
+	if output != "":
+		log_line.emit(output if output.ends_with("\n") else output + "\n", "itch")
+	var links := [
+		{"label": "Open game page", "url": Itch.game_url(user, game)},
+		{"label": "itch.io dashboard", "url": Itch.DASHBOARD_URL},
+	]
+	var auth: Dictionary = verdict.get("auth", {})
+	var target: Dictionary = verdict.get("target", {})
+	if code != 0 or str(auth.get("status", "")) != "ok" or str(target.get("status", "")) != "ok":
+		var failing := auth if str(auth.get("status", "")) != "ok" else target
+		var detail := str(failing.get("detail", ""))
+		build_finished.emit({"ok": false,
+			"title": "itch status: %s" % detail if detail != "" else "itch status check failed (exit %d)" % code,
+			"guidance": str(failing.get("guidance", "See the log above.")),
+			"links": links}, "itch")
+		return
+	var channels := Itch.parse_status(output)
+	if channels.is_empty():
+		build_finished.emit({"ok": true, "title": "%s/%s has no pushed builds yet" % [user, game],
+			"guidance": "Press ▶ Build → itch.io to push the first one.", "links": links}, "itch")
+		return
+	var lines := PackedStringArray()
+	for c in channels:
+		var version := str(c.get("version", ""))
+		lines.append("%s — build %s%s" % [c.get("channel", "?"), c.get("build", "?"),
+			(", version " + version) if version != "" else ""])
+	build_finished.emit({"ok": true,
+		"title": "%d channel(s) live on %s/%s" % [channels.size(), user, game],
+		"guidance": "\n".join(lines), "links": links}, "itch")
+
+
+# ── itch.io settings (dock forms) ─────────────────────────────────────────────
+
+## Accepts the game's page URL (https://you.itch.io/game) or "you/game".
+func set_itch_target(text: String) -> Dictionary:
+	var parsed := Itch.parse_itch_url(text.strip_edges())
+	if parsed.is_empty():
+		return err("Expected the game's itch.io URL (https://you.itch.io/game) or you/game.")
+	load_config()
+	config["itch"]["user"] = str(parsed["user"])
+	config["itch"]["game"] = str(parsed["game"])
+	save_config()
+	refresh_preflight()
+	return ok({"message": "itch target set to %s/%s." % [parsed["user"], parsed["game"]],
+		"links": [{"label": "Open game page", "url": Itch.game_url(str(parsed["user"]), str(parsed["game"]))}]})
+
+
+## Saves BUTLER_API_KEY to the gitignored .env. The key is never echoed — not
+## in the result, the log or an error.
+func set_butler_api_key(key: String) -> Dictionary:
+	var butler_secret := key.strip_edges()
+	if butler_secret == "":
+		return err("Paste an itch.io API key first (itch.io → Settings → API keys).")
+	if butler_secret.length() < 16 or butler_secret.contains(" ") or butler_secret.contains("\t") \
+			or butler_secret.contains("\n") or butler_secret.contains("=") or butler_secret.contains("\""):
+		return err("That doesn't look like an itch.io API key — copy it from itch.io → Settings → API keys.")
+	var env_file := write_env_vars({"BUTLER_API_KEY": butler_secret})
+	if env_file == "":
+		return err("Could not write %s." % env_write_path())
+	var note := ""
+	if OS.get_environment("BUTLER_API_KEY") != "":
+		note = " Note: BUTLER_API_KEY is also set in the editor's environment, and that one wins."
+	refresh_preflight()
+	return ok({"message": "itch.io API key saved to %s (gitignored).%s" % [env_file, note]})
+
+
+func set_project_version(v: String) -> Dictionary:
+	var version := v.strip_edges()
+	if version == "":
+		return err("Enter a version, e.g. 1.0.0.")
+	if version.contains("\n") or version.contains("\""):
+		return err("A version can't contain quotes or line breaks.")
+	ProjectSettings.set_setting("application/config/version", version)
+	var saved := ProjectSettings.save()
+	if saved != OK:
+		return err("Cannot write project.godot (error %d)." % saved)
+	refresh_preflight()
+	return ok({"message": "Project version set to %s." % version})
+
+
+# ── itch.io preflight + fixes ─────────────────────────────────────────────────
+
+## The seven itch.* rows. Starts (or reuses) the async `butler status` probe
+## when butler, credentials and the target all look usable; otherwise the
+## auth/target rows say why they couldn't be verified instead of hanging busy.
+func _itch_rows() -> Array:
+	var itch := _itch_config()
+	var user := str(itch.get("user", "")).strip_edges()
+	var game := str(itch.get("game", "")).strip_edges()
+	var resolved := _itch_resolved()
+	var enabled: Array = resolved.filter(func(c): return bool(c.get("enabled", false)))
+	var configured_channels: Variant = itch.get("channels", [])
+
+	var butler := resolve_butler_path()
+	var probe: Dictionary = (Exec.run(PackedStringArray([butler, "version"])) if butler != ""
+		else {"code": -1, "output": ""})
+	var butler_row := Itch.check_butler(probe, butler, _butler_download_channel() != "")
+	var key := butler_key()
+	var auth_row := Itch.check_auth(str(key["source"]), FileAccess.file_exists(_butler_creds_path()))
+	var target_row := Itch.check_target(user, game)
+
+	var butler_ok := butler != "" and str(butler_row["status"]) != "fail"
+	var auth_plausible := str(key["source"]) != "" or FileAccess.file_exists(_butler_creds_path())
+	var target_plausible := Itch.valid_slug(user) and Itch.valid_slug(game)
+	if butler_ok and auth_plausible and target_plausible:
+		if not _itch_proc.is_empty() and (str(_itch_proc.get("user", "")) != user
+				or str(_itch_proc.get("game", "")) != game):
+			# A probe for a stale target — replace it, carrying over a pending
+			# button report (which then answers for the new target).
+			var report := bool(_itch_proc.get("report", false))
+			Exec.kill_tree(int(_itch_proc["pid"]))
+			_itch_proc = {}
+			_spawn_itch_status(butler, user, game, report)
+		elif _itch_proc.is_empty():
+			_spawn_itch_status(butler, user, game, false)
+		if _itch_proc.is_empty():
+			_itch_unverified(auth_row, "couldn't start butler")
+			_itch_unverified(target_row, "couldn't start butler")
+		else:
+			auth_row["status"] = "busy"
+			target_row["status"] = "busy"
+	else:
+		var why_auth := "needs butler (row above)" if not butler_ok else "set the itch target"
+		var why_target := "needs butler (row above)" if not butler_ok else "needs itch.io credentials"
+		if str(auth_row["status"]) == "busy":
+			_itch_unverified(auth_row, why_auth)
+		if str(target_row["status"]) == "busy":
+			_itch_unverified(target_row, why_target)
+	if not _login_proc.is_empty():
+		auth_row["status"] = "busy"
+		auth_row["detail"] = "waiting for you to approve butler in the browser…"
+
+	return [
+		butler_row,
+		auth_row,
+		target_row,
+		Itch.check_channels(resolved, configured_channels is Array and not configured_channels.is_empty()),
+		_check_itch_templates(enabled),
+		Itch.check_web(enabled),
+		Itch.check_version(str(ProjectSettings.get_setting("application/config/version", ""))),
+	]
+
+
+## A row that would be "busy" awaiting `butler status`, but no probe can run.
+static func _itch_unverified(row: Dictionary, why: String) -> void:
+	row["status"] = "warn"
+	# Drop the evaluator's " — verifying…" / " — checking…" tail.
+	var detail := str(row.get("detail", "")).get_slice(" — ", 0).trim_suffix("…").strip_edges()
+	row["detail"] = ("%s — not verified (%s)" % [detail, why]) if detail != "" else "not verified (%s)" % why
+
+
+func _check_itch_templates(enabled: Array) -> Dictionary:
+	var v: Dictionary = Engine.get_version_info()
+	var dir := templates_dir()
+	var missing := PackedStringArray()
+	for c in enabled:
+		var options: Dictionary = c.get("options", {})
+		for file in Itch.required_template_files(str(c.get("platform", "")), options, true):
+			if not missing.has(file) and not FileAccess.file_exists(dir.path_join(file)):
+				missing.append(file)
+	return Itch.check_templates(missing, version_tag(v) + "." + str(v["status"]), templates_url(v) != "")
+
+
+## Download butler from itch's broth CDN and unpack it into
+## butler_managed_dir() — the same HTTPRequest + ZIPReader shape as
+## _fix_templates, under the same _fix_proc lock.
+func _fix_butler() -> Dictionary:
+	if not _fix_proc.is_empty():
+		return err("A fix is already running.")
+	var channel := _butler_download_channel()
+	if channel == "":
+		return err("No prebuilt butler for %s/%s — install it by hand: %s" % [
+			OS.get_name(), Engine.get_architecture_name(), Itch.BUTLER_DOCS_URL])
+	var url := Itch.butler_download_url(channel)
+	var cache := OS.get_cache_dir().path_join("build_kit")
+	var zip := cache.path_join("butler.zip")
+	DirAccess.make_dir_recursive_absolute(cache)
+	var http := HTTPRequest.new()
+	http.download_file = zip
+	add_child(http)
+	http.request_completed.connect(_on_butler_downloaded.bind(zip, http))
+	var request_err := http.request(url)
+	if request_err != OK:
+		http.queue_free()
+		return err("Couldn't start the download (err %d)." % request_err)
+	_fix_proc = {"label": "butler install", "platform": "itch"}
+	_set_row("itch.butler", "busy", "downloading butler (%s)…" % channel)
+	log_line.emit("\n── butler install ──\n%s\n→ %s\n" % [url, butler_managed_dir()], "itch")
+	return ok({"message": "Downloading butler — the row updates when done."})
+
+
+## "" for directory entries and anything that could escape dest (absolute
+## paths, '..' segments, backslashes) — butler's archive is flat (butler + its
+## 7-zip libs), so nothing legitimate is skipped. Pure, for the verifier.
+static func _butler_zip_target(entry: String, dest: String) -> String:
+	if entry == "" or entry.ends_with("/") or entry.begins_with("/") or entry.contains("\\") \
+			or entry.contains(":"):
+		return ""
+	for part in entry.split("/"):
+		if part == ".." or part == ".":
+			return ""
+	return dest.path_join(entry)
+
+
+func _on_butler_downloaded(result: int, response_code: int, _headers: PackedStringArray,
+		_body: PackedByteArray, zip: String, http: HTTPRequest) -> void:
+	http.queue_free()
+	_fix_proc = {}
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		log_line.emit("butler install FAILED (result %d, HTTP %d).\n" % [result, response_code], "itch")
+		refresh_preflight()
+		return
+	var reader := ZIPReader.new()
+	if reader.open(zip) != OK:
+		log_line.emit("butler install FAILED — could not open the downloaded archive.\n", "itch")
+		refresh_preflight()
+		return
+	var dest := butler_managed_dir()
+	var failure := ""
+	for entry in reader.get_files():
+		var target := _butler_zip_target(entry, dest)
+		if target == "":
+			continue
+		DirAccess.make_dir_recursive_absolute(target.get_base_dir())
+		var f := FileAccess.open(target, FileAccess.WRITE)
+		if f == null:
+			failure = "couldn't write %s (err %d)" % [target, FileAccess.get_open_error()]
+			break
+		f.store_buffer(reader.read_file(entry))
+		var werr := f.get_error()
+		f.close()
+		if werr != OK:
+			failure = "couldn't write %s (err %d)" % [target, werr]
+			break
+	reader.close()
+	DirAccess.remove_absolute(zip)
+	if failure != "":
+		log_line.emit("butler install FAILED — %s\n" % failure, "itch")
+		refresh_preflight()
+		return
+	var exe := dest.path_join(Itch.butler_exe_name(OS.get_name()))
+	if OS.get_name() != "Windows":
+		Exec.run(PackedStringArray(["chmod", "+x", exe]))
+	var probe: Dictionary = Exec.run(PackedStringArray([exe, "version"]))
+	if int(probe["code"]) != 0:
+		log_line.emit("butler install FAILED — %s doesn't run:\n%s\n" % [exe, str(probe["output"]).strip_edges()], "itch")
+	else:
+		log_line.emit("butler install finished — %s\n" % Itch.parse_butler_version(str(probe["output"])), "itch")
+	refresh_preflight()
+
+
+## Writes the channel list to build_kit.config.json: every itch-relevant
+## preset, keeping an existing entry's channel name + enabled flag when that
+## name is still valid and unique, else the default (html5/windows/mac/linux,
+## suffixed -2, -3… on a clash).
+func _fix_itch_channels() -> Dictionary:
+	load_config()
+	var discovered := Itch.resolve_channels([], Itch.list_presets(_read_export_presets()))
+	var existing := {}
+	var configured: Variant = _itch_config().get("channels", [])
+	if configured is Array:
+		for e in configured:
+			if e is Dictionary:
+				existing[str(e.get("preset", ""))] = e
+	var out: Array = []
+	var used := {}
+	for d in discovered:
+		var preset := str(d.get("preset", ""))
+		var platform := str(d.get("platform", ""))
+		if preset == "" or Itch.default_channel(platform) == "":
+			continue
+		var channel := str(d.get("channel", ""))
+		if channel == "":
+			channel = Itch.default_channel(platform)
+		var enabled := true
+		if existing.has(preset):
+			var prior: Dictionary = existing[preset]
+			var prior_channel := str(prior.get("channel", ""))
+			if Itch.valid_channel(prior_channel) and not used.has(prior_channel):
+				channel = prior_channel
+			enabled = bool(prior.get("enabled", true))
+		if used.has(channel):
+			var n := 2
+			while used.has("%s-%d" % [channel, n]):
+				n += 1
+			channel = "%s-%d" % [channel, n]
+		used[channel] = true
+		out.append({"preset": preset, "channel": channel, "enabled": enabled})
+	if out.is_empty():
+		return err("No itch-compatible export presets (Web, Windows Desktop, macOS, Linux) — add one in Project → Export, then Refresh.")
+	config["itch"]["channels"] = out
+	save_config()
+	refresh_preflight()
+	var names := PackedStringArray()
+	for e in out:
+		names.append("%s → %s%s" % [e["preset"], e["channel"], "" if e["enabled"] else " (disabled)"])
+	return ok({"message": "Saved %d itch channel(s) to %s: %s." % [out.size(), CONFIG_PATH, ", ".join(names)]})
+
+
+## Turns off variant/thread_support on every enabled Web channel's preset — a
+## threaded Web build only runs on itch with SharedArrayBuffer support ticked,
+## and breaks in browsers that refuse it. Same export_presets.cfg write as
+## _fix_android_preset.
+func _fix_itch_web() -> Dictionary:
+	load_config()
+	var text := _read_export_presets()
+	if text == "":
+		return err("No export_presets.cfg — create a Web preset in Project → Export first.")
+	var web_presets := {}
+	for c in _itch_resolved():
+		if bool(c.get("enabled", false)) and str(c.get("platform", "")) == "Web":
+			web_presets[str(c.get("preset", ""))] = true
+	var cfg := ConfigFile.new()
+	if cfg.load("res://export_presets.cfg") != OK:
+		return err("Cannot parse export_presets.cfg.")
+	var changed := PackedStringArray()
+	for p in Itch.list_presets(text):
+		var name := str(p.get("name", ""))
+		if str(p.get("platform", "")) != "Web" or not web_presets.has(name):
+			continue
+		var opt := str(p.get("section", "")) + ".options"
+		if str(cfg.get_value(opt, "variant/thread_support", false)).to_lower() == "true":
+			cfg.set_value(opt, "variant/thread_support", false)
+			changed.append(name)
+	if changed.is_empty():
+		refresh_preflight()
+		return ok({"message": "nothing to fix — no enabled Web preset uses threads."})
+	if cfg.save("res://export_presets.cfg") != OK:
+		return err("Cannot write export_presets.cfg.")
+	mark_dirty()
+	refresh_preflight()
+	return ok({"message": "variant/thread_support=false on %s." % ", ".join(changed)})
+
+
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
 func refresh_preflight() -> void:
@@ -743,6 +1649,7 @@ func refresh_preflight() -> void:
 	rows.append(_check_devices())
 	rows.append(_check_android_templates())
 	rows.append(_check_android_preset())
+	rows.append_array(_itch_rows())
 	preflight_rows = rows
 	preflight_changed.emit(rows)
 
@@ -780,11 +1687,11 @@ static func templates_url(v: Dictionary) -> String:
 
 func templates_dir() -> String:
 	var v: Dictionary = Engine.get_version_info()
-	# OS.get_data_dir() is the platform data root (~/Library/Application Support);
-	# Godot's templates live under its own "Godot" subdir. macOS spelling is fine
-	# here — the whole iOS pipeline is macOS-only (xcodebuild).
-	return OS.get_data_dir().path_join("Godot").path_join("export_templates").path_join(
-		version_tag(v) + "." + str(v["status"]))
+	# OS.get_data_dir() is the platform data root (~/Library/Application Support,
+	# %APPDATA%, ~/.local/share); Godot's templates live under its own subdir —
+	# "Godot" on macOS/Windows, lowercase "godot" on Linux (XDG convention).
+	return OS.get_data_dir().path_join(pick_by_os(OS.get_name(), "Godot", "godot", "Godot")) \
+		.path_join("export_templates").path_join(version_tag(v) + "." + str(v["status"]))
 
 
 func _check_templates() -> Dictionary:
@@ -804,12 +1711,15 @@ func _check_templates() -> Dictionary:
 ## violation with an EMPTY error list in headless runs — preflight is the only
 ## place the user ever learns why. (Root-caused live: a fresh project fails
 ## with "configuration errors:" and nothing after the colon.)
+## Mobile-only: `platforms` keeps the row out of the itch.io tab.
 func _check_etc2() -> Dictionary:
-	if bool(ProjectSettings.get_setting("rendering/textures/vram_compression/import_etc2_astc", false)):
-		return _row("etc2", "ETC2/ASTC textures", "ok", "enabled")
-	return _row("etc2", "ETC2/ASTC textures", "fail", "disabled",
-		"Both iOS and Android export require it. Godot hides this error in headless iOS builds; Android's own export reports it directly.\n1. Press Fix — enables rendering/textures/vram_compression/import_etc2_astc (textures reimport once)\n2. Build again.",
-		true)
+	var row := _row("etc2", "ETC2/ASTC textures", "ok", "enabled")
+	if not bool(ProjectSettings.get_setting("rendering/textures/vram_compression/import_etc2_astc", false)):
+		row = _row("etc2", "ETC2/ASTC textures", "fail", "disabled",
+			"Both iOS and Android export require it. Godot hides this error in headless iOS builds; Android's own export reports it directly.\n1. Press Fix — enables rendering/textures/vram_compression/import_etc2_astc (textures reimport once)\n2. Build again.",
+			true)
+	row["platforms"] = ["ios", "android"]
+	return row
 
 
 func _fix_etc2() -> Dictionary:
@@ -964,7 +1874,11 @@ func _check_devices() -> Dictionary:
 	return _row("ios.devices", "Paired device", "ok", "%d available" % available)
 
 
-# ── Android preflight (new checks; not wired into refresh_preflight() yet) ────
+# ── Android preflight ─────────────────────────────────────────────────────────
+#
+# templates + preset run in refresh_preflight(); the SDK / JDK / debug-keystore /
+# device checks take Editor Settings values this service can't read, so the dock
+# calls them with those values and merges the rows in.
 
 ## The same .tpz download contains templates for every platform — just a
 ## different file to check for here (android_debug.apk, not ios.zip). Only
@@ -1490,6 +2404,16 @@ func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 			return _fix_bundle_id()
 		"android.preset":
 			return _fix_android_preset()
+		"itch.butler":
+			return _fix_butler()
+		"itch.templates":
+			# Same .tpz as iOS/Android — it carries every platform's templates
+			# for the running Godot version; the row id tags the log "itch".
+			return _fix_templates(id)
+		"itch.channels":
+			return _fix_itch_channels()
+		"itch.web":
+			return _fix_itch_web()
 	return err("No fix for '%s'." % id)
 
 

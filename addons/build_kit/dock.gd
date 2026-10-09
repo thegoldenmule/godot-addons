@@ -2,10 +2,11 @@
 extends Control
 
 ## Build Kit dock — a pure view over BuildKitService: platform tabs (iOS,
-## Android), each with its own preflight checklist (failing rows show fix
-## instructions inline, plus a Fix button where the service can repair it),
+## Android, itch.io), each with its own preflight checklist (failing rows show
+## fix instructions inline, plus a Fix button where the service can repair it),
 ## build controls, and streaming pipeline log. Rows are namespaced
-## (ios.*/android.*); bare ids are global and render in both tabs. All
+## (ios.*/android.*/itch.*); bare ids are global and render in every tab, unless
+## the row carries a `platforms` Array naming the tabs it belongs to. All
 ## service signals are bound with METHOD CALLABLES (hot-reload safety, per
 ## the tool-kit rule).
 
@@ -26,6 +27,17 @@ var _btn_cancel: Button
 var _btn_tf_status: Button
 var _btn_install: Button
 var _btn_cancel_android: Button
+var _btn_itch_push: Button
+var _btn_itch_export: Button
+var _btn_itch_dry_run: Button
+var _btn_cancel_itch: Button
+var _btn_itch_status: Button
+var _itch_channel_picker: OptionButton
+var _itch_channels: Array = []    # channel names parallel to picker items 1.. (item 0 = all)
+var _selected_itch_channel := ""  # "" = all channels; survives picker re-population
+var _itch_target_text := ""       # survives preflight-row rebuilds, like _issuer_text
+var _butler_key_text := ""        # ditto; cleared the moment it's saved, never logged
+var _itch_version_text := ""      # ditto, for the project-version form
 var _p8_dialog: EditorFileDialog
 var _issuer_text := ""   # survives preflight-row rebuilds (rows re-render on refresh)
 var _bundle_text := ""   # ditto, for the create-preset form
@@ -45,6 +57,9 @@ func _ready() -> void:
 	add_child(tabs)
 	tabs.add_child(_build_ios_tab())
 	tabs.add_child(_build_android_tab())
+	tabs.add_child(_build_itch_tab())
+	# Node names can't hold '.', so the "itch.io" root got renamed "itch_io".
+	tabs.set_tab_title(2, "itch.io")
 
 	# OS-level file drop (the whole editor window fires this; we act only while
 	# this panel is visible and only on .p8 files — the ASC-key ingest path).
@@ -98,6 +113,55 @@ func _build_android_tab() -> Control:
 	return _make_platform_tab("android", "Android", "Build Android", build_col)
 
 
+func _build_itch_tab() -> Control:
+	_itch_channel_picker = OptionButton.new()
+	_itch_channel_picker.tooltip_text = "Which itch.io channel(s) to export / push"
+	_itch_channel_picker.item_selected.connect(_on_itch_channel_selected)
+	_populate_itch_channels([])
+	_btn_itch_push = Ui.button("▶ Build → itch.io", _on_build_itch_push,
+		"Export the selected channel(s), then butler push each to itch.io")
+	_btn_itch_export = Ui.button("Export only", _on_build_itch_export,
+		"Export the selected channel(s) into the staging folder — no upload")
+	_btn_itch_dry_run = Ui.button("Dry run", _on_build_itch_dry_run,
+		"Export, then butler push --dry-run (checks the upload without publishing)")
+	_btn_cancel_itch = Ui.button("✕ Cancel", _on_cancel)
+	_btn_cancel_itch.disabled = true
+	_btn_itch_status = Ui.button("itch status", _on_itch_status,
+		"butler status for this game's channels (needs butler + an API key / butler login)")
+	var build_col := VBoxContainer.new()
+	build_col.add_child(Ui.form_row("Channel", _itch_channel_picker))
+	build_col.add_child(Ui.button_bar([_btn_itch_push, _btn_itch_export, _btn_itch_dry_run,
+		_btn_cancel_itch, _btn_itch_status]))
+	return _make_platform_tab("itch", "itch.io", "Build itch.io", build_col)
+
+
+## Rebuild the channel picker from service.itch_channels() (resolved, enabled
+## channels), keeping the current choice if that channel still exists — else
+## falling back to "All channels".
+func _populate_itch_channels(channels: Array) -> void:
+	_itch_channels.clear()
+	_itch_channel_picker.clear()
+	_itch_channel_picker.add_item("All channels", 0)
+	var selected_index := 0
+	for entry in channels:
+		var channel := str(entry.get("channel", ""))
+		if channel == "" or _itch_channels.has(channel):
+			continue
+		_itch_channels.append(channel)
+		var preset := str(entry.get("preset", ""))
+		_itch_channel_picker.add_item("%s (%s)" % [channel, preset] if preset != "" else channel,
+			_itch_channels.size())
+		if channel == _selected_itch_channel:
+			selected_index = _itch_channels.size()
+	if selected_index == 0:
+		_selected_itch_channel = ""
+	_itch_channel_picker.select(selected_index)
+
+
+func _on_itch_channel_selected(index: int) -> void:
+	_selected_itch_channel = str(_itch_channels[index - 1]) if index >= 1 and index <= _itch_channels.size() else ""
+
+
 ## Shared preflight + build + log layout for one platform tab. `build_col` is
 ## the caller-assembled build-controls section (its buttons, if any, are
 ## already added) — this only appends the status line + link bar it shares
@@ -146,6 +210,16 @@ func _make_platform_tab(platform: String, tab_name: String, build_section_title:
 static func _row_platform(id: String) -> String:
 	var dot := id.find(".")
 	return id.substr(0, dot) if dot != -1 else ""
+
+
+## Whether `row` renders in `platform`'s tab: an explicit `platforms` Array
+## wins; otherwise the id prefix decides (bare ids render everywhere).
+static func _row_in_tab(row: Dictionary, platform: String) -> bool:
+	var platforms = row.get("platforms")
+	if platforms is Array:
+		return (platforms as Array).has(platform)
+	var row_platform := _row_platform(str(row["id"]))
+	return row_platform == "" or row_platform == platform
 
 
 ## EditorSettings the Android toolchain rows need — build_kit_service can't
@@ -254,6 +328,34 @@ func _on_cancel_android() -> void:
 	service.cancel()
 
 
+func _on_build_itch_push() -> void:
+	_start_itch("push")
+
+
+func _on_build_itch_export() -> void:
+	_start_itch("export")
+
+
+func _on_build_itch_dry_run() -> void:
+	_start_itch("dry_run")
+
+
+func _start_itch(mode: String) -> void:
+	var result: Dictionary = service.start_build_itch(mode, _selected_itch_channel)
+	if not result.get("ok", false):
+		_set_status("itch", str(result.get("error", "")), Pal.ERROR, STATUS_TOAST_SECONDS)
+
+
+func _on_itch_status() -> void:
+	var result: Dictionary = service.check_itch_status()
+	if not result.get("ok", false):
+		_set_status("itch", str(result.get("error", "")), Pal.ERROR, STATUS_TOAST_SECONDS)
+		return
+	# Same as _on_tf_status: retire the previous verdict while the probe runs.
+	_set_status("itch", "Checking itch.io…", Pal.TEXT)
+	_fill_links(_status_links["itch"], [])
+
+
 func _on_tf_status() -> void:
 	var result: Dictionary = service.check_testflight_status()
 	if not result.get("ok", false):
@@ -266,13 +368,18 @@ func _on_tf_status() -> void:
 
 
 func _on_stage_changed(stage: String, platform: String) -> void:
-	# One global pipeline — a build on either platform disables both tabs' buttons.
+	# One global pipeline — a build on any platform disables every tab's buttons.
 	var busy := stage != ""
 	_btn_testflight.disabled = busy
 	_btn_ipa.disabled = busy
 	_btn_cancel.disabled = not busy
 	_btn_install.disabled = busy
 	_btn_cancel_android.disabled = not busy
+	_btn_itch_push.disabled = busy
+	_btn_itch_export.disabled = busy
+	_btn_itch_dry_run.disabled = busy
+	_itch_channel_picker.disabled = busy
+	_btn_cancel_itch.disabled = not busy
 	if stage != "":
 		_set_status(platform, "Running: " + stage + "…", Pal.TEXT)
 
@@ -322,13 +429,13 @@ func _on_preflight_changed(rows: Array) -> void:
 	if _selected_team == "" and not _teams.is_empty():
 		_selected_team = str(_teams[0]["id"])
 	var android_rows := _android_settings_rows()
+	_populate_itch_channels(service.itch_channels())
 	for platform in _rows_box:
 		var box: VBoxContainer = _rows_box[platform]
 		for child in box.get_children():
 			child.queue_free()
 		for row in rows:
-			var row_platform := _row_platform(str(row["id"]))
-			if row_platform == "" or row_platform == platform:
+			if _row_in_tab(row, platform):
 				box.add_child(_make_row(row, platform))
 		if platform == "android":
 			for row in android_rows:
@@ -398,6 +505,15 @@ func _make_row(row: Dictionary, platform: String) -> Control:
 			elif bool(row.get("fixable", false)) and _teams.size() > 1:
 				# The Fix needs a team choice — put the picker right here.
 				box.add_child(_make_team_picker())
+		if str(row["status"]) != "busy":
+			# busy = the async butler-status probe is still deciding; no form yet.
+			match str(row["id"]):
+				"itch.target":
+					box.add_child(_make_itch_target_form())
+				"itch.auth":
+					box.add_child(_make_butler_key_form())
+				"itch.version":
+					box.add_child(_make_itch_version_form())
 	return box
 
 
@@ -529,9 +645,98 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 			return
 
 
-func _show_result(result: Dictionary) -> void:
-	_set_status("ios", str(result.get("message", result.get("error", ""))),
+## itch.target form: the game's page URL (or `user/game`) → set_itch_target.
+func _make_itch_target_form() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", Pal.SEP)
+	var target := LineEdit.new()
+	target.placeholder_text = "https://<user>.itch.io/<game>"
+	target.text = _itch_target_text
+	target.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	target.text_changed.connect(_on_itch_target_changed)
+	row.add_child(target)
+	row.add_child(Ui.button("Save", _on_save_itch_target))
+	return row
+
+
+func _on_itch_target_changed(text: String) -> void:
+	_itch_target_text = text
+
+
+func _on_save_itch_target() -> void:
+	_show_result(service.set_itch_target(_itch_target_text), "itch")
+
+
+## itch.auth form: a masked field for the itch.io API key → set_butler_api_key
+## (written to the gitignored .env). The held text and the field are cleared as
+## soon as Save is pressed, and the key is never echoed to the status or log.
+## Below it, "Sign in with browser" runs `butler login` instead (no key to paste).
+func _make_butler_key_form() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", Pal.SEP)
+	var field := LineEdit.new()
+	field.secret = true
+	field.placeholder_text = "itch.io API key"
+	field.text = _butler_key_text
+	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	field.text_changed.connect(_on_butler_key_changed)
+	row.add_child(field)
+	row.add_child(Ui.button("Save", _on_save_butler_key.bind(field),
+		"Stored as BUTLER_API_KEY in the project's gitignored .env"))
+	var box := VBoxContainer.new()
+	box.add_child(row)
+	box.add_child(Ui.button_bar([Ui.button("Sign in with browser", _on_butler_login,
+		"Runs `butler login`: approve butler on itch.io in your browser and its credentials are saved for every project on this machine")]))
+	return box
+
+
+func _on_butler_login() -> void:
+	_show_result(service.start_butler_login(), "itch")
+
+
+func _on_butler_key_changed(text: String) -> void:
+	_butler_key_text = text
+
+
+func _on_save_butler_key(field: LineEdit) -> void:
+	var key := _butler_key_text
+	_butler_key_text = ""
+	if is_instance_valid(field):
+		field.clear()
+	_show_result(service.set_butler_api_key(key), "itch")
+
+
+## itch.version form: application/config/version → set_project_version (sent
+## to butler as --userversion).
+func _make_itch_version_form() -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", Pal.SEP)
+	var version := LineEdit.new()
+	version.placeholder_text = "1.0.0"
+	version.text = _itch_version_text
+	version.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	version.text_changed.connect(_on_itch_version_changed)
+	row.add_child(version)
+	row.add_child(Ui.button("Save", _on_save_itch_version))
+	return row
+
+
+func _on_itch_version_changed(text: String) -> void:
+	_itch_version_text = text
+
+
+func _on_save_itch_version() -> void:
+	_show_result(service.set_project_version(_itch_version_text), "itch")
+
+
+## A one-off action's ok()/err() result → that tab's status toast (+ its link
+## bar, when the result carries links).
+func _show_result(result: Dictionary, platform := "ios") -> void:
+	_set_status(platform, str(result.get("message", result.get("error", ""))),
 		Pal.TEXT if result.get("ok", false) else Pal.ERROR, STATUS_TOAST_SECONDS)
+	var bar: HBoxContainer = _status_links.get(platform)
+	if bar != null and result.has("links"):
+		_fill_links(bar, result.get("links", []))
 
 
 ## android.sdk/android.jdk write an Editor Setting — apply_fix() can't reach

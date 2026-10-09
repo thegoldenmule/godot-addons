@@ -1,9 +1,9 @@
 # Build Kit
 
-One-button device builds from inside the Godot editor: **iOS → TestFlight**
-and **Android → Device**. An [`editor_tool_kit`](../editor_tool_kit/README.md)
-tool: a headless-testable `BuildKitService` + a bottom-panel dock, one tab per
-platform.
+One-button builds from inside the Godot editor: **iOS → TestFlight**,
+**Android → Device** and **itch.io** (Web/desktop channels via `butler`). An
+[`editor_tool_kit`](../editor_tool_kit/README.md) tool: a headless-testable
+`BuildKitService` + a bottom-panel dock, one tab per target.
 
 ## What it does
 
@@ -46,7 +46,7 @@ backfills a missing `export_path`, which the Editor's Export dialog leaves
 blank by default), the debug keystore Godot generates and signs debug builds
 with (detect-only — no Fix; the actionable row is the JDK one, since that's
 what Godot's own keystore generation needs), export templates (shared with
-iOS — one download, two rows), the ETC2/ASTC project setting Android export
+iOS and itch.io — one download, a row on each tab), the ETC2/ASTC project setting Android export
 requires, and any `adb`-connected device.
 
 **Build → Device** — two stages, both detached and cancellable:
@@ -71,6 +71,51 @@ the intent without hiding it: Build → Play Console (AAB upload) and Build
 .apk-only (local export) both need "Use Gradle Build" turned on, which this
 pass deliberately doesn't do; release-keystore ingestion is independent of
 that but has no ingestion UI yet either.
+
+### itch.io
+
+**Preflight** — a third checklist, on the **itch.io** tab:
+
+| Row | Checks | Fix |
+|---|---|---|
+| `itch.butler` | `butler version` runs (managed copy → the itch app's own copy → `butler` on `PATH`) | **Fix** downloads butler from itch's broth CDN into the managed location (below) |
+| `itch.auth` | an API key in the process env or `.env` (`BUTLER_API_KEY`), or the creds file `butler login` writes; then `butler status` confirms it | **Sign in with browser** runs `butler login`: it opens itch.io in your browser, you approve butler, and the credentials are saved for every project on the machine. Or paste a key into the inline field (**↗ Open API keys** opens itch's settings page) — saved to the gitignored `.env`, never echoed |
+| `itch.target` | `itch.user` / `itch.game` are valid slugs, and `butler status` can see the game | Paste the game's URL (`https://<user>.itch.io/<game>`) or `<user>/<game>` into the inline field. The game page must already exist — **↗ Create new project** opens itch's creation form |
+| `itch.channels` | at least one enabled channel, each naming an existing export preset, with unique, valid channel names | **Fix** writes the auto-discovered channels into `build_kit.config.json` so you can edit them |
+| `itch.templates` | the release export templates each enabled channel's platform needs | **Fix** — the same template download the iOS/Android rows use |
+| `itch.web` | warns when the Web preset has **thread support** on (needs SharedArrayBuffer, i.e. cross-origin isolation on itch's side) | **Fix** turns `variant/thread_support` off in `export_presets.cfg`; or keep threads and enable SharedArrayBuffer on the itch page (see Setup) |
+| `itch.version` | warns when `application/config/version` is empty (the push then carries no `--userversion`) | Type a version into the inline field — it's written to Project Settings |
+
+`itch.auth` and `itch.target` show as busy while a background `butler status`
+runs, then resolve to green/red from its output.
+
+**Build → itch.io** — every stage detached and cancellable, logs streamed into
+the dock:
+
+1. For each enabled channel: `godot --headless --export-release "<preset>"`
+   into `build/itch/<channel>/` (Web → `index.html`; desktop → the preset's
+   export file name, else the app name + `.exe` / `.x86_64` / `.zip`). Each
+   channel dir is wiped and recreated first, so a push never carries stale
+   files. The Web export is then checked against itch's HTML5 limits (an
+   `index.html` at the top, ≤ 1000 files, ≤ 200 MB per file, ≤ 500 MB total).
+2. Only once **every** export has succeeded:
+   `butler push build/itch/<channel> <user>/<game>:<channel> --userversion <version> --if-changed`
+   per channel. The API key reaches butler through the process environment,
+   never the command line, so it never appears in the echoed log.
+
+The staging dir gets its own `.gdignore` (Godot won't import the exports) and
+`.gitignore` (`*`), so nothing under it is ever committed.
+
+A channel picker narrows a run to one channel. Alongside the main button:
+
+- **Export only** — stage 1 only; nothing is uploaded.
+- **Dry run** — exports, then `butler push --dry-run` (reports what would be
+  uploaded).
+- **itch status** — `butler status <user>/<game>`: each channel's latest
+  build and version.
+
+butler failures (no butler, bad/expired key, unknown game, invalid channel
+name, network errors) get the same `classify.gd` treatment, scoped to itch.io.
 
 ## Why not Godot's built-in .ipa export?
 
@@ -116,14 +161,42 @@ preset's signing fields stay **empty** and no secret ever lands in
    goes green once `adb` reports it authorized. Godot generates its own debug
    keystore automatically; there's nothing to set up for that.
 
+### itch.io
+
+1. Create the game page on itch.io first (Dashboard → Create new project) —
+   butler can push to an existing project but can't create one. Paste its URL
+   into the `itch.target` row.
+2. Have an export preset per platform you ship (Web, Windows Desktop, macOS,
+   Linux). With no `itch.channels` configured they're auto-discovered:
+   **Web → `html5`**, **Windows Desktop → `windows`**, **macOS → `mac`**,
+   **Linux → `linux`**.
+3. Sign in: press **Sign in with browser** on the `itch.auth` row and approve
+   butler on itch.io (once per machine). Or paste an API key from
+   [itch.io → Settings → API keys](https://itch.io/user/settings/api-keys)
+   into that row (saved as `BUTLER_API_KEY` in `.env`), or export
+   `BUTLER_API_KEY` in your shell. Lookup order: process env → `.env` →
+   `butler login`'s creds file. butler only runs its browser sign-in when it
+   has a terminal, so on macOS/Linux the button runs it under `script` (a
+   pseudo-terminal).
+4. butler itself: **Fix** on `itch.butler` installs a managed copy into the OS
+   user data dir — `~/Library/Application Support/build_kit/butler/` (macOS),
+   `~/.local/share/build_kit/butler/` (Linux), `%APPDATA%\build_kit\butler\`
+   (Windows). Outside any repo, shared by every project on the machine.
+5. **First HTML5 push only** — itch can't infer this, so on the game's edit
+   page after the first `html5` push: set **Kind of project = HTML**, tick
+   **"This file will be played in the browser"** on the `html5` upload, set the
+   **viewport size** to your game's resolution, and — only if the Web preset
+   has thread support on — enable **SharedArrayBuffer support** under
+   Embed options. Later pushes keep these settings.
+
 ### Where the two kinds of state live
 
 Build Kit splits its state by whether it is safe to commit:
 
 | | File | Committed? | Holds |
 |---|---|---|---|
-| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `android.preset`, `android.version_code` |
-| Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` (iOS only) |
+| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `android.preset`, `android.version_code`, `itch.user`, `itch.game`, `itch.output_dir`, `itch.channels` |
+| Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` (iOS); `BUTLER_API_KEY` (itch.io) |
 
 ```json
 {
@@ -134,9 +207,24 @@ Build Kit splits its state by whether it is safe to commit:
 	"android": {
 		"preset": "Android",
 		"version_code": 1
+	},
+	"itch": {
+		"user": "<your-itch-user>",
+		"game": "<your-game-slug>",
+		"output_dir": "build/itch",
+		"channels": [
+			{ "preset": "Web", "channel": "html5", "enabled": true },
+			{ "preset": "Windows Desktop", "channel": "windows", "enabled": true }
+		]
 	}
 }
 ```
+
+`itch.channels` may be left empty (`[]`) — every Web / Windows Desktop /
+macOS / Linux preset is then pushed to its default channel (`html5` /
+`windows` / `mac` / `linux`). List entries to rename a channel, disable one
+(`"enabled": false`), or skip a preset. `itch.output_dir` must be a relative
+path inside the project.
 
 `android.version_code` isn't read or written by anything yet — it's a home
 for the Play Console upload path to auto-bump, the same way `build_number`
@@ -147,13 +235,14 @@ bumps on every TestFlight upload, once that pipeline exists.
 ASC_KEY_ID=ABC123DEFG
 ASC_ISSUER_ID=12345678-abcd-...
 ASC_KEY_PATH=~/private_keys/AuthKey_ABC123DEFG.p8
+BUTLER_API_KEY=<your-itch-api-key>
 ```
 
 The key path is stored home-relative so it still resolves on another machine.
 Saving a credential also checks that the `.env` is gitignored and adds the rule
 if it is missing — writing a secret into a tracked file would only relocate the
-leak. `ASC_*` in the process environment works too, and takes precedence over
-the `.env`.
+leak. `ASC_*` / `BUTLER_API_KEY` in the process environment work too, and
+take precedence over the `.env`.
 
 > **Upgrading from ≤ 0.1.7:** those versions wrote the three `asc_*` fields into
 > `build_kit.config.json`, which is committed. On first load 0.1.8+ moves any it
@@ -179,6 +268,7 @@ registers it on first archive).
 | `build_kit_service.gd` | preflight + pipeline state machine (headless-testable) |
 | `exec.gd` | detached process runner (log file + exit sentinel, poll/kill) — cmd.exe on Windows, `/bin/zsh` on macOS, `/bin/sh` on Linux |
 | `classify.gd` | failure signatures → plain-language guidance |
+| `itch.gd` | itch.io helpers (static): channel discovery, butler args/URLs, status parsing, HTML5 bundle limits, the `itch.*` preflight rows |
 | `asc_helper.py` | App Store Connect API probe (stdlib-only; ES256 via openssl) |
 | `dock.gd` | the bottom-panel view |
 
