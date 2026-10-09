@@ -13,7 +13,8 @@ Operational steps for a game that uses `addons/snapser_kit`. This repo is
 | `smoke/run_smoke.sh`, `smoke/smoke.gd` | here | Live smoke test against one game's snapend. |
 | `check_declarations.sh` | here | Offline check that the config's `"declared"` section, boards and cloud-save blob match `snapser/snapend-manifest.json`. |
 | `clear_board_rows.sh` | here | Admin. Lists named users' rows on a dev snapend board (`--dry-run`). Uses the platform key only to confirm the snapend is DEVELOPMENT. **It can't delete:** Snapser has no row-delete API, so it prints the console steps. |
-| `snapser/snapend-manifest.json` | game repo | That game's snapend as code (from the template). |
+| `snapend_manifest.sh` | here | Redacted manifests. `pull`, `fmt`, `diff`, `apply`, `scan` and `secrets`: commit placeholders, inject secrets only at apply time. See "Secrets in snapend manifests" below. |
+| `snapser/snapend-manifest.json` | game repo | That game's snapend as code, committed **redacted** (placeholders for secrets; see "Secrets in snapend manifests"). |
 | `game/snapser_kit.config.json` | game repo | Committed client config: `game_id`, `gateway_url`, boards, cloud-save keys, link providers, optional `"quests": true`. |
 
 ## Provision a game's dev snapend
@@ -44,21 +45,94 @@ Operational steps for a game that uses `addons/snapser_kit`. This repo is
    - **Session impact (observed 2026-10-08):** settings-only applies, including auth settings, did **not** log out a live session.
    - Applies that **add or remove snaps**, and BYOSnap syncs, are untested here. Moveborne saw a BYOSnap sync and apply invalidate every session, so treat them as logging everyone out.
    - Either way, the kit re-logs-in anonymous players silently (401 → re-login → replay).
-   - Use the template for `snapctl snapend create` only. `apply` diffs against `applied_configuration`, so apply to an existing snapend with a freshly downloaded manifest (step 4) plus your edits.
+   - Use the template for `snapctl snapend create` only. Apply to an existing snapend with `snapend_manifest.sh apply`, never with raw `snapctl snapend apply` (see "Secrets in snapend manifests"):
    ```bash
-   snapctl snapend apply \
-     --manifest-path-filename snapser/snapend-manifest.json --blocking
+   tools/snapser/snapend_manifest.sh apply --snapend <snapend-id> snapser/snapend-manifest.json --dry-run
+   tools/snapser/snapend_manifest.sh apply --snapend <snapend-id> snapser/snapend-manifest.json
    ```
-   snapctl reads its key from `~/.snapser/config` unless the platform-key
-   environment variable is set. If your shell exports a stale one, prefix the
-   command with `env -u <that variable>`. Never paste the key anywhere.
-4. Round-trip the manifest so the repo matches what the server normalised:
-   ```bash
-   snapctl snapend download --snapend-id <id> --category snapend-manifest
-   ```
-   Commit the downloaded manifest in the game repo. A later apply should be a no-op.
+   snapctl reads its key from `~/.snapser/config`. The wrapper unsets the
+   platform-key environment variable (env -u), so a stale shell export can't
+   override it. Never paste the key anywhere.
+4. The committed manifest is the redacted form. If the server normalised
+   something on apply, `snapend_manifest.sh diff --snapend <snapend-id> snapser/snapend-manifest.json`
+   shows it; take it with `pull` (below). A later apply should be a no-op.
 5. Write `game/snapser_kit.config.json` with the gateway URL (`https://gateway.snapser.com/<snapend-id>`) and the boards.
 6. Run the smoke test (below). For Web exports, also check CORS from the hosting origin.
+
+## Secrets in snapend manifests
+
+A downloaded snapend manifest carries connector secrets in clear text: the Apple
+Sign in `.p8` key under `settings[auth].data.<tier>.apple.private_key`, and again
+inside the `applied_configuration` string. **A game repo never commits them.**
+`snapser/snapend-manifest.json` is committed in redacted form:
+
+- `applied_configuration` is dropped. It is an opaque copy of the whole manifest,
+  secrets included; `apply` takes it from live.
+- Volatile keys are dropped everywhere: `exported_at`, `created_at`, `updated_at`,
+  `created_by`, `revision`, `last_run_at`.
+- Each secret string becomes a whole-value placeholder `"@@secret:<name>@@"`:
+  - `apple/<key-id>/private_key`
+  - `<connector>/<client-id>/client_secret` (google, facebook, epic, xbox, discord, x, app_verify)
+  - `steam/<app-id>/<field>`
+  - `<snapend-id>/<dotted json path>` for anything else that looks secret (a
+    catch-all on names like `private_key`, `client_secret`, `secret`, `token`,
+    `webhook_secret`, `signing_key`, and on any PEM block).
+
+  `key_id`, `key`, `session_token_validity` and `is_prefix_key` are never redacted.
+
+The secrets themselves stay outside every repo. `~/.config/snapser-secrets/sources.json`
+(directory `0700`, file `0600`; the tool refuses looser modes) holds **references
+only**:
+
+```json
+{"version": 1,
+ "allowed_snapends": ["<snapend-id>"],
+ "allowed_environments": ["DEVELOPMENT"],
+ "secrets": {
+   "apple/<key-id>/private_key": {"file": "~/private_keys/<the .p8 file>", "strip": true, "expect": "pem"},
+   "<name>": {"keychain": {"service": "snapser-secrets", "account": "<name>"}}}}
+```
+
+Every command runs through `tools/snapser/snapend_manifest.sh`, which unsets the
+platform-key variable. Nothing prints a secret: output is limited to placeholder
+names, JSON paths, booleans and sha256 match results, and snapctl's own output is
+scrubbed. Exit codes: `0` ok, `1` drift or scan hit, `2` usage or config, `3`
+refused, `4` apply failed, `5` verify mismatch.
+
+| Task | Command |
+|---|---|
+| Take the whole live manifest | `snapend_manifest.sh pull --snapend <snapend-id> --out snapser/snapend-manifest.json` |
+| Take only some settings from live, keeping local edits elsewhere | `snapend_manifest.sh pull --snapend <snapend-id> --into snapser/snapend-manifest.json --only auth --out snapser/snapend-manifest.json` |
+| Canonicalise (redacts anything secret) | `snapend_manifest.sh fmt snapser/snapend-manifest.json` (`--check` to only report) |
+| Compare with live | `snapend_manifest.sh diff --snapend <snapend-id> snapser/snapend-manifest.json --check-secrets` |
+| Apply | `snapend_manifest.sh apply --snapend <snapend-id> snapser/snapend-manifest.json [--dry-run] [--yes] [--allow-noop]` |
+| Look for leaks | `snapend_manifest.sh scan <paths>` or `scan --staged` (the game repos' pre-commit hook) |
+| Write the sources skeleton | `snapend_manifest.sh secrets init <manifests...> --write` |
+| Check every placeholder has a source | `snapend_manifest.sh secrets check <manifests...>` |
+
+`secrets init` maps each `apple/<key-id>/private_key` to
+`~/private_keys/<AuthKey file for key-id>.p8` and every other name to a keychain
+item; add a keychain item with `security add-generic-password -s snapser-secrets -a <name> -w`.
+`secrets init` and `secrets check` only test that a `.p8` exists; they never open it.
+
+`apply`:
+1. refuses an unresolved placeholder, a missing source file, a value that fails
+   its `expect: pem` check, a snapend that is not allow-listed, a file whose `id`
+   differs from `--snapend`, or a non-allowed environment;
+2. downloads live, prints the redacted plan diff and per-secret
+   unchanged/changed/new, and stops there when nothing changed (unless
+   `--allow-noop`) or on `--dry-run`;
+3. needs `--yes`, or the snapend id typed at a terminal;
+4. builds the upload in a private temp dir (`0700`, file `0600`, deleted even on
+   Ctrl-C or SIGTERM): committed content with the secrets injected, live's
+   volatile fields, and live's `applied_configuration` verbatim (the server
+   rejects a mismatch);
+5. runs `snapctl snapend apply --blocking`, re-downloads, and checks that the
+   redacted live equals the committed file, `private_key_set` per tier, and that
+   every secret's hash matches. A mismatch exits `5`.
+
+**Never raw-apply** a committed manifest: its placeholders would replace the
+real keys on the snapend.
 
 ## Declarations
 
