@@ -10,8 +10,10 @@ extends "res://addons/editor_tool_kit/tool_service.gd"
 ##    what to do, not to fail with a raw log.
 ## 2. PIPELINE — the staged build: Godot headless export (project-only) →
 ##    Info.plist patch (encryption-exempt + build number) → xcodebuild archive
-##    (automatic signing) → xcodebuild -exportArchive (destination: upload →
-##    TestFlight, or export → local .ipa). Android exports a debug APK and adb
+##    (unsigned) → ad-hoc sign with the project's .entitlements →
+##    xcodebuild -exportArchive to a local .ipa (automatic signing) → verify
+##    the .ipa's entitlements → (TestFlight) -exportArchive with destination:
+##    upload. See ios_stages. Android exports a debug APK and adb
 ##    installs it; itch.io exports every configured channel (Web/Windows/macOS/
 ##    Linux presets) into a staging dir and `butler push`es each one.
 ##
@@ -410,8 +412,213 @@ static func derive_paths(project_root: String, export_path: String, platform: St
 		out["xcodeproj"] = build_dir.path_join(app + ".xcodeproj")
 		out["archive"] = build_dir.path_join(app + ".xcarchive")
 		out["info_plist"] = build_dir.path_join(app).path_join(app + "-Info.plist")
+		# Godot's Xcode template: CODE_SIGN_ENTITLEMENTS = "$binary/$binary.entitlements",
+		# PRODUCT_NAME = "$binary" — so the .app, the .ipa and the entitlements
+		# file are all named after the export path's basename.
+		out["entitlements"] = build_dir.path_join(app).path_join(app + ".entitlements")
+		out["archived_app"] = out["archive"].path_join("Products/Applications").path_join(app + ".app")
+		out["ipa"] = build_dir.path_join(app + ".ipa")
+		out["ipa_check_dir"] = build_dir.path_join("build_kit_ipa_check")
+		out["ipa_entitlements"] = build_dir.path_join("build_kit_ipa_entitlements.plist")
 		out["options_plist"] = build_dir.path_join("build_kit_export_options.plist")
+		out["upload_options_plist"] = build_dir.path_join("build_kit_upload_options.plist")
 	return out
+
+
+## The iOS stage list (pure — no side effects, so the verifier can assert the
+## exact command lines). Signing is split so the uploaded binary provably
+## carries the project's entitlements:
+##
+## 1. archive is unsigned (CODE_SIGNING_ALLOWED=NO): dev-signing it would need
+##    a dev profile, which Apple refuses to mint for a team with no devices.
+## 2. embed_entitlements ad-hoc signs the archived .app with the generated
+##    .entitlements file. Without this the unsigned app declares NO
+##    entitlements, so -exportArchive's automatic signing neither asks for a
+##    profile with e.g. Sign in with Apple (it happily reuses a stale one) nor
+##    keeps such entitlements in the re-signed binary.
+## 3. export_ipa runs -exportArchive (destination: export,
+##    -allowProvisioningUpdates) — the distribution signing; a profile that
+##    lacks a requested capability is regenerated here.
+## 4. verify_entitlements unzips the .ipa and dumps the signed app's
+##    entitlements; the "entitlements" post_check fails the build when any
+##    entitlement of the .entitlements file is missing (see
+##    entitlement_mismatches) — before anything is uploaded.
+## 5. upload (TestFlight only) re-runs -exportArchive with destination: upload
+##    on the same archive, which resolves to the profile step 3 just verified.
+static func ios_stages(paths: Dictionary, godot_path: String, project_root: String, preset_name: String,
+		build_number: int, upload: bool, auth: PackedStringArray) -> Array:
+	var pb := "/usr/libexec/PlistBuddy"
+	var plist := Exec.quote(paths["info_plist"])
+	var ent := Exec.quote(paths["entitlements"])
+	var stages: Array = [
+		{
+			"name": "export",
+			"shell": Exec.command_line(PackedStringArray([
+				godot_path, "--headless", "--path", project_root,
+				"--export-release", preset_name, paths["out"],
+			])),
+		},
+		{
+			"name": "patch",
+			"shell": "%s -c 'Delete :ITSAppUsesNonExemptEncryption' %s 2>/dev/null; %s -c 'Add :ITSAppUsesNonExemptEncryption bool false' %s && %s -c 'Set :CFBundleVersion %d' %s" % [
+				pb, plist, pb, plist, pb, build_number, plist],
+		},
+		{
+			"name": "archive",
+			"shell": Exec.command_line(PackedStringArray([
+				"xcodebuild", "archive",
+				"-project", paths["xcodeproj"], "-scheme", paths["app"],
+				"-configuration", "Release", "-destination", "generic/platform=iOS",
+				"-archivePath", paths["archive"],
+				"CODE_SIGNING_ALLOWED=NO",
+			])),
+		},
+		{
+			"name": "embed_entitlements",
+			"shell": "if [ ! -f %s ]; then echo %s; exit 1; fi; %s" % [
+				ent, Exec.quote("build_kit: no entitlements file at " + str(paths["entitlements"])),
+				Exec.command_line(PackedStringArray([
+					"codesign", "--force", "--sign", "-",
+					"--entitlements", paths["entitlements"], paths["archived_app"],
+				]))],
+		},
+		{
+			"name": "export_ipa",
+			"shell": "rm -f %s && %s" % [Exec.quote(paths["ipa"]), Exec.command_line(PackedStringArray([
+				"xcodebuild", "-exportArchive",
+				"-archivePath", paths["archive"],
+				"-exportOptionsPlist", paths["options_plist"],
+				"-exportPath", paths["dir"],
+				"-allowProvisioningUpdates",
+			]) + auth)],
+		},
+		{
+			"name": "verify_entitlements",
+			"shell": "rm -rf %s %s && mkdir -p %s && %s && %s > %s" % [
+				Exec.quote(paths["ipa_check_dir"]), Exec.quote(paths["ipa_entitlements"]),
+				Exec.quote(paths["ipa_check_dir"]),
+				Exec.command_line(PackedStringArray(["unzip", "-q", paths["ipa"], "-d", paths["ipa_check_dir"]])),
+				Exec.command_line(PackedStringArray([
+					"codesign", "--display", "--entitlements", "-", "--xml",
+					paths["ipa_check_dir"].path_join("Payload").path_join(paths["app"] + ".app"),
+				])),
+				Exec.quote(paths["ipa_entitlements"])],
+			"post_check": "entitlements",
+			"expected": paths["entitlements"],
+			"actual": paths["ipa_entitlements"],
+		},
+	]
+	if upload:
+		stages.append({
+			"name": "upload",
+			"shell": Exec.command_line(PackedStringArray([
+				"xcodebuild", "-exportArchive",
+				"-archivePath", paths["archive"],
+				"-exportOptionsPlist", paths["upload_options_plist"],
+				"-allowProvisioningUpdates",
+			]) + auth),
+		})
+	return stages
+
+
+## Entitlement keys whose VALUE distribution signing legitimately rewrites
+## (development → production, team-prefixed expansions): only their presence
+## is checked.
+const SIGNING_REWRITTEN_ENTITLEMENTS := [
+	"aps-environment",
+	"com.apple.developer.aps-environment",
+	"com.apple.developer.icloud-container-environment",
+	"get-task-allow",
+	"application-identifier",
+	"com.apple.developer.team-identifier",
+	"keychain-access-groups",
+]
+
+
+## Compares the entitlements a project declares (`expected`, its .entitlements
+## file) with those the signed app actually carries (`actual`). Returns one
+## human-readable line per problem; empty = every declared entitlement made it.
+## Extra entitlements in `actual` are fine (signing adds application-identifier
+## etc.). Values holding an unexpanded build setting ("$(...)") and the keys in
+## SIGNING_REWRITTEN_ENTITLEMENTS are checked for presence only; arrays must
+## contain every declared element.
+static func entitlement_mismatches(expected: Dictionary, actual: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	var keys := expected.keys()
+	keys.sort()
+	for key in keys:
+		if not actual.has(key):
+			out.append("%s (missing)" % key)
+			continue
+		if SIGNING_REWRITTEN_ENTITLEMENTS.has(key):
+			continue
+		var want: Variant = expected[key]
+		var got: Variant = actual[key]
+		if want is Array:
+			if not got is Array:
+				out.append("%s (expected an array, got %s)" % [key, JSON.stringify(got)])
+				continue
+			for item in want:
+				if _has_build_setting(item):
+					continue
+				if not (got as Array).has(item):
+					out.append("%s (missing value %s)" % [key, JSON.stringify(item)])
+		elif not _has_build_setting(want) and want != got:
+			out.append("%s (expected %s, got %s)" % [key, JSON.stringify(want), JSON.stringify(got)])
+	return out
+
+
+static func _has_build_setting(value: Variant) -> bool:
+	return value is String and (value as String).contains("$(")
+
+
+## Reads a plist file (XML or binary) into a Dictionary via `plutil -convert
+## json`. An existing but empty file reads as {} — that is what `codesign
+## --display --entitlements` writes for a binary with no entitlements.
+## Returns {ok, data} or {ok:false, error}.
+static func read_plist_file(path: String) -> Dictionary:
+	if not FileAccess.file_exists(path):
+		return {"ok": false, "error": "%s does not exist" % path}
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {"ok": false, "error": "cannot open %s" % path}
+	var empty := f.get_length() == 0 or f.get_as_text().strip_edges() == ""
+	f.close()
+	if empty:
+		return {"ok": true, "data": {}}
+	var out: Array = []
+	var code := OS.execute("plutil", ["-convert", "json", "-o", "-", path], out, true)
+	var text := "".join(out.map(func(c): return str(c)))
+	var data: Variant = JSON.parse_string(text) if code == 0 else null
+	if not data is Dictionary:
+		return {"ok": false, "error": "plutil couldn't read %s (exit %d): %s" % [path, code, text.strip_edges()]}
+	return {"ok": true, "data": data}
+
+
+## The "entitlements" post_check: every entitlement in the generated project's
+## .entitlements file must be in the exported .ipa's signature. Returns {} when
+## it passes, else a failed-build result for _finish.
+static func check_ipa_entitlements(expected_path: String, actual_path: String, context: Dictionary = {}) -> Dictionary:
+	var expected := read_plist_file(expected_path)
+	var actual := read_plist_file(actual_path)
+	for r in [expected, actual]:
+		if not r["ok"]:
+			return {"ok": false, "title": "Couldn't verify the .ipa's entitlements — not uploaded",
+				"guidance": str(r["error"])}
+	var problems := entitlement_mismatches(expected["data"], actual["data"])
+	if problems.is_empty():
+		return {}
+	return {
+		"ok": false,
+		"title": "The signed .ipa is missing entitlements — not uploaded",
+		"guidance": ("The Xcode project declares entitlements the distribution-signed app doesn't carry:\n- %s\n"
+			+ "Usually the App ID lacks the capability, or the provisioning profile predates it:\n"
+			+ "1. ↗ Open Identifiers → %s → enable the capability (e.g. Sign in with Apple), Save\n"
+			+ "2. Press the build button again — export runs with -allowProvisioningUpdates, so a fresh profile is minted\n"
+			+ "3. If it repeats, delete the stale profile from ~/Library/Developer/Xcode/UserData/Provisioning Profiles and retry.") % [
+				"\n- ".join(problems), str(context.get("bundle_id", "your bundle id"))],
+		"links": [{"label": "Open Identifiers", "url": "https://developer.apple.com/account/resources/identifiers/list"}],
+	}
 
 
 static func make_export_options_xml(team_id: String, upload: bool) -> String:
@@ -475,57 +682,20 @@ func start_build(upload := true) -> Dictionary:
 		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
 	var use_key := teams.is_empty() and has_asc_key()
 
-	var f := FileAccess.open(paths["options_plist"], FileAccess.WRITE)
-	if f == null:
-		DirAccess.make_dir_recursive_absolute(paths["dir"])
-		f = FileAccess.open(paths["options_plist"], FileAccess.WRITE)
-	if f == null:
-		return err("Cannot write %s" % paths["options_plist"])
-	f.store_string(make_export_options_xml(_preset["team_id"], upload))
-	f.close()
+	# Always export a local .ipa first (verified before anything is uploaded);
+	# the upload stage, if any, gets its own destination=upload options file.
+	DirAccess.make_dir_recursive_absolute(paths["dir"])
+	var options := {paths["options_plist"]: false}
+	if upload:
+		options[paths["upload_options_plist"]] = true
+	for options_path in options:
+		if not _write_text(options_path, make_export_options_xml(_preset["team_id"], options[options_path])):
+			return err("Cannot write %s" % options_path)
 
 	var auth := _auth_flags() if use_key else PackedStringArray()
 	log_line.emit("auth: %s\n" % ("ASC API key %s" % _context["key_id"] if use_key
 		else "Xcode session (teams: %s)" % ", ".join(teams)), _active_platform)
-	var pb := "/usr/libexec/PlistBuddy"
-	var plist: String = paths["info_plist"]
-	_stages = [
-		{
-			"name": "export",
-			"shell": Exec.command_line(PackedStringArray([
-				OS.get_executable_path(), "--headless", "--path", root,
-				"--export-release", _preset["name"], paths["out"],
-			])),
-		},
-		{
-			"name": "patch",
-			"shell": "%s -c 'Delete :ITSAppUsesNonExemptEncryption' %s 2>/dev/null; %s -c 'Add :ITSAppUsesNonExemptEncryption bool false' %s && %s -c 'Set :CFBundleVersion %d' %s" % [
-				pb, Exec.quote(plist), pb, Exec.quote(plist), pb, build_number, Exec.quote(plist)],
-		},
-		{
-			# Unsigned on purpose: the export stage does the only signing that
-			# matters (distribution), and distribution profiles need no
-			# registered devices — dev-signing the archive required a dev
-			# profile, which Apple refuses to mint for a device-less team.
-			"name": "archive",
-			"shell": Exec.command_line(PackedStringArray([
-				"xcodebuild", "archive",
-				"-project", paths["xcodeproj"], "-scheme", paths["app"],
-				"-configuration", "Release", "-destination", "generic/platform=iOS",
-				"-archivePath", paths["archive"],
-				"CODE_SIGNING_ALLOWED=NO",
-			])),
-		},
-		{
-			"name": "upload" if upload else "export_ipa",
-			"shell": Exec.command_line(PackedStringArray([
-				"xcodebuild", "-exportArchive",
-				"-archivePath", paths["archive"],
-				"-exportOptionsPlist", paths["options_plist"],
-				"-allowProvisioningUpdates",
-			]) + (PackedStringArray() if upload else PackedStringArray(["-exportPath", paths["dir"]])) + auth),
-		},
-	]
+	_stages = ios_stages(paths, OS.get_executable_path(), root, _preset["name"], build_number, upload, auth)
 	_next_stage(paths)
 	return ok({"stages": _stages.size() + 1, "build_number": build_number})
 
@@ -601,7 +771,8 @@ func _auth_flags() -> PackedStringArray:
 ## stages log per channel under the staging dir), `env` (Dictionary injected
 ## into the child's environment only, see _spawn_with_env — the shell line is
 ## echoed to the log, so secrets travel here, never on it) and `post_check`
-## (a check run in _poll_pipeline after a zero exit, e.g. "web_bundle").
+## (a check run in _poll_pipeline after a zero exit, e.g. "web_bundle", or
+## "entitlements" with its `expected` / `actual` plist paths).
 func _next_stage(paths: Dictionary = {}) -> void:
 	if paths.is_empty() and _active_platform != "itch":
 		var root := ProjectSettings.globalize_path("res://")
@@ -712,6 +883,16 @@ func _poll_pipeline() -> void:
 				"links": [{"label": "itch.io HTML5 docs", "url": "https://itch.io/docs/creators/html5"}],
 				"log": log_path})
 			return
+	if code == 0 and str(_stage_def.get("post_check", "")) == "entitlements":
+		var failure := check_ipa_entitlements(str(_stage_def.get("expected", "")),
+			str(_stage_def.get("actual", "")), _context)
+		if not failure.is_empty():
+			_stages = []
+			failure["stage"] = _stage
+			failure["log"] = log_path
+			_finish(failure)
+			return
+		log_line.emit("✓ the .ipa carries every entitlement in %s\n" % str(_stage_def.get("expected", "")), _active_platform)
 	if code == 0:
 		_next_stage()
 		return

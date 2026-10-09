@@ -21,16 +21,35 @@ with its log streamed into the dock (cancellable, never blocks the editor):
 2. `PlistBuddy` patch: `ITSAppUsesNonExemptEncryption=false` (no "Missing
    Compliance" stall in TestFlight) + `CFBundleVersion` from an auto-bumped
    build number
-3. `xcodebuild archive` — **unsigned** (`CODE_SIGNING_ALLOWED=NO`): the export
-   stage does the only signing that matters, and skipping dev-signing here
-   removes the dev-profile requirement (Apple refuses to mint one for a team
-   with no registered devices)
-4. `xcodebuild -exportArchive` with `method: app-store-connect`,
-   `destination: upload` — signs everything with a distribution certificate
-   (cloud signing via the Xcode session or an App Manager API key) and
-   uploads straight to App Store Connect
+3. `xcodebuild archive` — **unsigned** (`CODE_SIGNING_ALLOWED=NO`): skipping
+   dev-signing removes the dev-profile requirement (Apple refuses to mint one
+   for a team with no registered devices)
+4. `codesign --force --sign - --entitlements <App>/<App>.entitlements` on the
+   archived `.app` — an ad-hoc signature whose only job is to *declare* the
+   entitlements Godot's export wrote (including the preset's
+   `entitlements/additional`, e.g. Sign in with Apple). Without it the
+   unsigned archive declares none, so export signing silently reuses a stale
+   provisioning profile and drops those entitlements from the binary
+5. `xcodebuild -exportArchive -allowProvisioningUpdates` with
+   `method: app-store-connect`, `destination: export` — the distribution
+   signing (cloud signing via the Xcode session or an App Manager API key);
+   a profile missing a requested capability is regenerated here. The signed
+   `.ipa` lands next to the Xcode project
+6. **Entitlement check** — unzips the `.ipa`, reads the signed app's
+   entitlements (`codesign --display --entitlements - --xml`) and **fails the
+   build, uploading nothing,** if any entitlement in the `.entitlements` file
+   is missing (or an array/bool/string value differs; `aps-environment` and
+   other values signing rewrites are checked for presence only)
+7. `xcodebuild -exportArchive -allowProvisioningUpdates` again with
+   `destination: upload` — the same archive and the just-verified profile,
+   uploaded straight to App Store Connect
 
-"Build .ipa only" runs the same pipeline with `destination: export`.
+"Build .ipa only" runs stages 1–6 and stops.
+
+> **0.2.1:** before this, the archive was exported without its entitlements
+> ever being declared, so a capability added to the App ID after its
+> profile was first minted (Sign in with Apple, here) was missing from the
+> uploaded build. If an older build of yours lacks one, rebuild with 0.2.1+.
 
 Known failures (missing app record, signing conflicts, expired sessions, …)
 are classified into plain-language guidance rather than raw xcodebuild logs —

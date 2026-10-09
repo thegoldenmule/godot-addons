@@ -2,8 +2,9 @@ extends SceneTree
 
 ## Headless verifier for the build_kit addon's service logic: shell quoting,
 ## failure classification, preset parsing, export-options generation, env
-## parsing, teams parsing, helper-JSON parsing, and a real spawn round-trip
-## through exec.gd's log + exit-sentinel contract.
+## parsing, teams parsing, helper-JSON parsing, a real spawn round-trip
+## through exec.gd's log + exit-sentinel contract, and the iOS signing stages
+## (command lines + the .ipa entitlement check, end to end on macOS).
 ## Run: godot --headless --path . --script res://tools/verify_build_kit.gd
 
 const Exec := preload("res://addons/build_kit/exec.gd")
@@ -450,6 +451,7 @@ func _initialize() -> void:
 
 	_verify_itch()
 	_verify_itch_classify()
+	_verify_ios_signing()
 
 	print("VERIFY build_kit: %s" % ("PASS" if _fails == 0 else "FAIL (%d)" % _fails))
 	quit(0 if _fails == 0 else 1)
@@ -865,3 +867,174 @@ func _verify_itch_classify() -> void:
 	_check("classify unscoped export rule matches itch",
 		Classify.classify("No export template found at the expected path: web_nothreads_release.zip", {}, "itch")["id"] == "no_export_templates")
 	_check("classify itch rules carry links", not (Classify.classify("invalid key", {}, "itch").get("links", []) as Array).is_empty())
+
+
+# --- iOS signing: stage command lines + .ipa entitlement verification ----------
+
+const ENT_SIWA := """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>development</string>
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+	<key>com.apple.developer.game-center</key>
+	<true/>
+</dict>
+</plist>
+"""
+
+const ENT_SIGNED_OK := """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>application-identifier</key><string>ABCDE12345.com.example.game</string><key>aps-environment</key><string>production</string><key>beta-reports-active</key><true/><key>com.apple.developer.applesignin</key><array><string>Default</string></array><key>com.apple.developer.game-center</key><true/><key>com.apple.developer.team-identifier</key><string>ABCDE12345</string><key>get-task-allow</key><false/></dict></plist>
+"""
+
+const ENT_SIGNED_STALE := """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>application-identifier</key><string>ABCDE12345.com.example.game</string><key>aps-environment</key><string>production</string><key>com.apple.developer.game-center</key><true/><key>get-task-allow</key><false/></dict></plist>
+"""
+
+
+func _verify_ios_signing() -> void:
+	var paths := ServiceT.derive_paths("/proj/game/", "../build/ios/Game.ipa", "iOS")
+	_check("paths entitlements", paths["entitlements"] == "/proj/build/ios/Game/Game.entitlements", str(paths))
+	_check("paths archived app", paths["archived_app"] == "/proj/build/ios/Game.xcarchive/Products/Applications/Game.app", str(paths))
+	_check("paths ipa", paths["ipa"] == "/proj/build/ios/Game.ipa", str(paths))
+	_check("paths options split", paths["options_plist"] != paths["upload_options_plist"], str(paths))
+
+	var auth := PackedStringArray(["-authenticationKeyPath", "/k/AuthKey.p8", "-authenticationKeyID", "KEY", "-authenticationKeyIssuerID", "ISS"])
+	var up: Array = ServiceT.ios_stages(paths, "/godot", "/proj/game/", "iOS", 7, true, auth)
+	var names := up.map(func(st): return st["name"])
+	_check("ios stages (upload)", names == ["export", "patch", "archive", "embed_entitlements", "export_ipa", "verify_entitlements", "upload"], str(names))
+	var local: Array = ServiceT.ios_stages(paths, "/godot", "/proj/game/", "iOS", 7, false, PackedStringArray())
+	var local_names := local.map(func(st): return st["name"])
+	_check("ios stages (ipa only) verify but never upload", local_names == ["export", "patch", "archive", "embed_entitlements", "export_ipa", "verify_entitlements"], str(local_names))
+	if OS.get_name() == "Windows":
+		return  # the rest asserts POSIX quoting; the iOS pipeline is macOS-only anyway
+	var by_name := {}
+	for st in up:
+		by_name[st["name"]] = st
+	var archive := str(by_name["archive"]["shell"])
+	_check("archive stays unsigned", archive.contains("'CODE_SIGNING_ALLOWED=NO'"), archive)
+	var embed := str(by_name["embed_entitlements"]["shell"])
+	_check("embed ad-hoc signs the archived app with the project entitlements",
+		embed.contains("'codesign' '--force' '--sign' '-' '--entitlements' '/proj/build/ios/Game/Game.entitlements' '/proj/build/ios/Game.xcarchive/Products/Applications/Game.app'"), embed)
+	_check("embed fails loudly without the entitlements file", embed.contains("build_kit: no entitlements file at") and embed.contains("exit 1"), embed)
+	var exp := str(by_name["export_ipa"]["shell"])
+	_check("export_ipa exports locally with provisioning updates",
+		exp.contains("'-exportOptionsPlist' '%s'" % paths["options_plist"]) and exp.contains("'-exportPath' '/proj/build/ios'")
+			and exp.contains("'-allowProvisioningUpdates'") and exp.contains("'-authenticationKeyID' 'KEY'"), exp)
+	_check("export_ipa clears a stale .ipa first", exp.begins_with("rm -f '/proj/build/ios/Game.ipa' && "), exp)
+	var ver: Dictionary = by_name["verify_entitlements"]
+	_check("verify unzips the ipa and dumps the signed entitlements",
+		str(ver["shell"]).contains("'unzip' '-q' '/proj/build/ios/Game.ipa'")
+			and str(ver["shell"]).contains("'codesign' '--display' '--entitlements' '-' '--xml' '/proj/build/ios/build_kit_ipa_check/Payload/Game.app'"), str(ver["shell"]))
+	_check("verify post_check wiring", ver.get("post_check", "") == "entitlements"
+		and ver.get("expected", "") == paths["entitlements"] and ver.get("actual", "") == paths["ipa_entitlements"], str(ver))
+	var upl := str(by_name["upload"]["shell"])
+	_check("upload uses the upload options + provisioning updates + auth",
+		upl.contains("'-exportOptionsPlist' '%s'" % paths["upload_options_plist"]) and upl.contains("'-allowProvisioningUpdates'")
+			and upl.contains("'-authenticationKeyIssuerID' 'ISS'") and not upl.contains("-exportPath"), upl)
+	_check("export options destinations", ServiceT.make_export_options_xml("ABCDE12345", false).contains("<string>export</string>")
+		and ServiceT.make_export_options_xml("ABCDE12345", true).contains("<string>upload</string>"))
+
+	# entitlement_mismatches (pure)
+	var want := {"com.apple.developer.applesignin": ["Default"], "aps-environment": "development",
+		"com.apple.developer.game-center": true, "com.apple.developer.associated-domains": ["applinks:example.com"],
+		"com.apple.developer.ubiquity-container-identifiers": ["iCloud.$(CFBundleIdentifier)"]}
+	var full := {"com.apple.developer.applesignin": ["Default"], "aps-environment": "production",
+		"com.apple.developer.game-center": true, "com.apple.developer.associated-domains": ["applinks:example.com", "webcredentials:example.com"],
+		"com.apple.developer.ubiquity-container-identifiers": ["iCloud.com.example.game"], "application-identifier": "ABCDE12345.com.example.game"}
+	_check("mismatch none when all present (aps rewritten, $() expanded, extras ok)", ServiceT.entitlement_mismatches(want, full).is_empty(),
+		str(ServiceT.entitlement_mismatches(want, full)))
+	var no_siwa := full.duplicate()
+	no_siwa.erase("com.apple.developer.applesignin")
+	var m := ServiceT.entitlement_mismatches(want, no_siwa)
+	_check("mismatch: missing SIWA", m.size() == 1 and m[0].begins_with("com.apple.developer.applesignin (missing)"), str(m))
+	var short_domains := full.duplicate()
+	short_domains["com.apple.developer.associated-domains"] = ["webcredentials:example.com"]
+	var short_m := ServiceT.entitlement_mismatches(want, short_domains)
+	_check("mismatch: array element missing", short_m.size() == 1
+		and short_m[0] == "com.apple.developer.associated-domains (missing value \"applinks:example.com\")", str(short_m))
+	var gc_off := full.duplicate()
+	gc_off["com.apple.developer.game-center"] = false
+	_check("mismatch: bool value differs", ServiceT.entitlement_mismatches(want, gc_off).size() == 1)
+	_check("mismatch: empty expectation always passes", ServiceT.entitlement_mismatches({}, {}).is_empty())
+
+	if OS.get_name() != "macOS":
+		return  # plutil / codesign / zip are macOS tools
+	var dir := OS.get_cache_dir().path_join("build_kit_verify").path_join("ios_signing")
+	_delete_dir(dir)
+	DirAccess.make_dir_recursive_absolute(dir)
+	var ent_path := dir.path_join("Game.entitlements")
+	_write(ent_path, ENT_SIWA)
+	_write(dir.path_join("ok.plist"), ENT_SIGNED_OK)
+	_write(dir.path_join("stale.plist"), ENT_SIGNED_STALE)
+	_write(dir.path_join("empty.plist"), "")
+	var parsed := ServiceT.read_plist_file(ent_path)
+	_check("read_plist_file parses XML", parsed["ok"] and parsed["data"].get("com.apple.developer.applesignin", []) == ["Default"], str(parsed))
+	_check("read_plist_file: empty codesign dump = no entitlements", ServiceT.read_plist_file(dir.path_join("empty.plist")) == {"ok": true, "data": {}})
+	_check("read_plist_file: missing file errors", not ServiceT.read_plist_file(dir.path_join("nope.plist"))["ok"])
+	_check("check_ipa_entitlements passes a fully-signed fixture", ServiceT.check_ipa_entitlements(ent_path, dir.path_join("ok.plist")).is_empty())
+	var stale := ServiceT.check_ipa_entitlements(ent_path, dir.path_join("stale.plist"), {"bundle_id": "com.example.game"})
+	_check("check_ipa_entitlements fails the stale-profile fixture", stale.get("ok", true) == false
+		and str(stale.get("guidance", "")).contains("com.apple.developer.applesignin (missing)")
+		and str(stale.get("title", "")).contains("not uploaded"), str(stale))
+	_check("check_ipa_entitlements fails an empty signature", not ServiceT.check_ipa_entitlements(ent_path, dir.path_join("empty.plist")).is_empty())
+
+	# End to end: run the real embed + verify stage shells against a fake
+	# archive / .ipa (an ad-hoc-signable stand-in binary, no Xcode needed).
+	var e2e := ServiceT.derive_paths(dir.path_join("game") + "/", "../out/Game.ipa", "iOS")
+	DirAccess.make_dir_recursive_absolute(e2e["archived_app"])
+	DirAccess.make_dir_recursive_absolute(e2e["entitlements"].get_base_dir())
+	_write(e2e["entitlements"], ENT_SIWA)
+	_write(e2e["archived_app"].path_join("Info.plist"), "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Game</string><key>CFBundleIdentifier</key><string>com.example.game</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n")
+	var app_q := Exec.quote(e2e["archived_app"])
+	var setup := _sh("cp /usr/bin/true %s/Game && codesign --remove-signature %s/Game" % [app_q, app_q])
+	_check("e2e: fake unsigned app", setup[0] == 0, setup[1])
+	var stages: Array = ServiceT.ios_stages(e2e, "/godot", "/x", "iOS", 1, false, PackedStringArray())
+	var embed_st: Dictionary = stages.filter(func(st): return st["name"] == "embed_entitlements")[0]
+	var verify_st: Dictionary = stages.filter(func(st): return st["name"] == "verify_entitlements")[0]
+	var to_ipa := "cd %s && rm -rf Payload %s && mkdir Payload && cp -R %s Payload/ && zip -qr %s Payload && rm -rf Payload" % [
+		Exec.quote(dir), Exec.quote(e2e["ipa"]), app_q, Exec.quote(e2e["ipa"])]
+	var r := _sh(str(embed_st["shell"]))
+	_check("e2e: embed stage signs", r[0] == 0, r[1])
+	r = _sh(to_ipa)
+	_check("e2e: ipa zipped", r[0] == 0, r[1])
+	r = _sh(str(verify_st["shell"]))
+	_check("e2e: verify stage dumps entitlements", r[0] == 0, r[1])
+	var pass_result := ServiceT.check_ipa_entitlements(verify_st["expected"], verify_st["actual"])
+	_check("e2e: entitlements survive into the ipa", pass_result.is_empty(), str(pass_result))
+	# the bug: an app signed WITHOUT the entitlements (what -exportArchive made
+	# of the unsigned archive) must fail the check, i.e. block the upload
+	r = _sh("codesign --force --sign - %s && %s && %s" % [app_q, to_ipa, verify_st["shell"]])
+	_check("e2e: re-sign without entitlements", r[0] == 0, r[1])
+	var fail_result := ServiceT.check_ipa_entitlements(verify_st["expected"], verify_st["actual"])
+	_check("e2e: missing entitlement fails the build", fail_result.get("ok", true) == false
+		and str(fail_result.get("guidance", "")).contains("com.apple.developer.applesignin (missing)"), str(fail_result))
+	# missing entitlements file -> loud, classified failure
+	DirAccess.remove_absolute(e2e["entitlements"])
+	r = _sh(str(embed_st["shell"]))
+	_check("e2e: embed fails without the entitlements file", r[0] != 0
+		and Classify.classify(r[1], {}, "ios")["id"] == "no_entitlements_file", r[1])
+	_delete_dir(dir)
+
+
+func _sh(line: String) -> Array:
+	var out: Array = []
+	var code := OS.execute("/bin/zsh", ["-c", "( %s ) 2>&1" % line], out)
+	return [code, "".join(out.map(func(c): return str(c)))]
+
+
+func _write(path: String, text: String) -> void:
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(text)
+	f.close()
+
+
+func _delete_dir(path: String) -> void:
+	if path.contains("build_kit_verify") and DirAccess.dir_exists_absolute(path):
+		OS.execute("rm", ["-rf", path])

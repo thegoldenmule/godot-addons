@@ -23,6 +23,13 @@ extends RefCounted
 static func rules() -> Array:
 	return [
 		{
+			"id": "no_entitlements_file",
+			"patterns": ["build_kit: no entitlements file at"],
+			"title": "The exported Xcode project has no .entitlements file",
+			"guidance": "Build Kit signs the archive with the entitlements file Godot's iOS export writes (<App>/<App>.entitlements next to the .xcodeproj). It wasn't there — the Godot export template may have changed its layout. Re-run the build; if it repeats, check the export dir and report it.",
+			"platforms": ["ios"],
+		},
+		{
 			"id": "no_dist_cert",
 			"patterns": ["No signing certificate \"iOS Distribution\"", "No signing certificate \"Apple Distribution\""],
 			"title": "No distribution certificate in the keychain",
