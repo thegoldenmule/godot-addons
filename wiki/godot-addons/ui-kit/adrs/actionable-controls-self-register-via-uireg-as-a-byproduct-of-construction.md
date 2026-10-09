@@ -1,8 +1,9 @@
-# ADR-10: Actionable controls self-register via UiReg as a byproduct of construction
+# Actionable controls self-register via UiReg as a byproduct of construction
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-10
 - **Date:** 2026-06-18
 - **Scope:** ui_kit
 

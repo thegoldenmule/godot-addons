@@ -1,8 +1,9 @@
-# ADR-15: The publish payload splices each blob's raw on-disk JSON verbatim, preserving numeric fidelity
+# The publish payload splices each blob's raw on-disk JSON verbatim, preserving numeric fidelity
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-15
 - **Date:** 2026-06-19
 - **Scope:** remote_config_editor
 - **Deciders:** Benjamin Jordan

@@ -1,8 +1,9 @@
-# ADR-8: ADR-8: ContentStore owns the atomic write but not serialization, which stays per-tool
+# ADR-8: ContentStore owns the atomic write but not serialization, which stays per-tool
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-8
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

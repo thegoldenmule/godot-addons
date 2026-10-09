@@ -1,8 +1,9 @@
-# ADR-16: Drift check shells out to one project-supplied comparator, never reimplemented in GDScript
+# Drift check shells out to one project-supplied comparator, never reimplemented in GDScript
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-16
 - **Date:** 2026-06-19
 - **Scope:** remote_config_editor
 - **Deciders:** Benjamin Jordan

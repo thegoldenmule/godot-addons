@@ -1,8 +1,9 @@
-# ADR-9: UiRouter is an async stack-FSM; navigation transitions are awaitable
+# UiRouter is an async stack-FSM; navigation transitions are awaitable
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-9
 - **Date:** 2026-06-18
 - **Scope:** ui_kit
 

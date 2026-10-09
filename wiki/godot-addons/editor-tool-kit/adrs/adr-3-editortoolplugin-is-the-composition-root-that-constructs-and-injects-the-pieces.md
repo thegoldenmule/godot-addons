@@ -1,8 +1,9 @@
-# ADR-3: ADR-3: EditorToolPlugin is the composition root that constructs and injects the pieces
+# ADR-3: EditorToolPlugin is the composition root that constructs and injects the pieces
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-3
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

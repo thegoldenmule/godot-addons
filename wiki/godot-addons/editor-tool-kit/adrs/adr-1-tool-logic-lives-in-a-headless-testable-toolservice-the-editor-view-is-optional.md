@@ -1,8 +1,9 @@
-# ADR-1: ADR-1: Tool logic lives in a headless-testable ToolService; the editor view is optional
+# ADR-1: Tool logic lives in a headless-testable ToolService; the editor view is optional
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-1
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

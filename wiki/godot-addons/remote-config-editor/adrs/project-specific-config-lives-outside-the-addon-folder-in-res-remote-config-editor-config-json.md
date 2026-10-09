@@ -1,8 +1,9 @@
-# ADR-14: Project-specific config lives outside the addon folder, in res://remote_config_editor.config.json
+# Project-specific config lives outside the addon folder, in res://remote_config_editor.config.json
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-14
 - **Date:** 2026-06-19
 - **Scope:** remote_config_editor
 - **Deciders:** Benjamin Jordan

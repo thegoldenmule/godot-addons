@@ -1,8 +1,9 @@
-# ADR-2: ADR-2: Service methods return an {ok, error} Dictionary instead of throwing
+# ADR-2: Service methods return an {ok, error} Dictionary instead of throwing
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-2
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

@@ -1,8 +1,9 @@
-# ADR-5: ADR-5: The palette duplicates theme values by intent; the kit never imports a host theme
+# ADR-5: The palette duplicates theme values by intent; the kit never imports a host theme
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-5
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

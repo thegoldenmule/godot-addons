@@ -1,8 +1,9 @@
-# ADR-7: ADR-7: Self-update extracts only the addon subtree, never prunes, and rolls back on failure
+# ADR-7: Self-update extracts only the addon subtree, never prunes, and rolls back on failure
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-7
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

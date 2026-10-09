@@ -1,8 +1,9 @@
-# ADR-12: The addon registers no autoloads; the consuming project declares them
+# The addon registers no autoloads; the consuming project declares them
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-12
 - **Date:** 2026-06-18
 - **Scope:** ui_kit
 

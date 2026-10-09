@@ -1,8 +1,9 @@
-# ADR-6: ADR-6: Vendored-but-sourced distribution with in-editor self-update; version is the ship signal
+# ADR-6: Vendored-but-sourced distribution with in-editor self-update; version is the ship signal
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-6
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

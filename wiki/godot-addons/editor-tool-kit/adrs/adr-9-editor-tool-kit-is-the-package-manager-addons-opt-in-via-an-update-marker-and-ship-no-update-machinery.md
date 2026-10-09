@@ -1,8 +1,9 @@
-# ADR-13: ADR-9: editor_tool_kit is the package manager; addons opt in via an [update] marker and ship no update machinery
+# ADR-9: editor_tool_kit is the package manager; addons opt in via an [update] marker and ship no update machinery
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-13
 - **Date:** 2026-06-19
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan

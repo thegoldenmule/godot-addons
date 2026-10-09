@@ -1,8 +1,9 @@
-# ADR-11: UiDriver knows no game specifics; the game supplies a ui_nav_host
+# UiDriver knows no game specifics; the game supplies a ui_nav_host
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-11
 - **Date:** 2026-06-18
 - **Scope:** ui_kit
 

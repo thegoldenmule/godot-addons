@@ -1,8 +1,9 @@
-# ADR-4: ADR-4: Style via one Theme cascaded from the panel root, not per-dock styling
+# ADR-4: Style via one Theme cascaded from the panel root, not per-dock styling
 
 **Status:** accepted
 
 ## Metadata
+- **Number:** ADR-4
 - **Date:** 2026-06-17
 - **Scope:** editor_tool_kit
 - **Deciders:** Benjamin Jordan
