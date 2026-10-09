@@ -57,6 +57,19 @@ extends Node
 ##     writes; those are ignored while importing, so a pull never schedules a
 ##     push.
 ##   - pull() / push() are serialized (one at a time); concurrent callers wait.
+##   - PER-USER BOOKKEEPING (v0.2.2): the state (CAS token, version,
+##     has_synced, synced hash) belongs to ONE Snapser user and records its
+##     user_id. When the session user changes (switch_account, sign_out, a
+##     different login) it is reset, so a new user never reuses the previous
+##     user's CAS / version / has_synced. Only the device id survives.
+##   - ACCOUNT WINS ON SWITCH (D36): adopt_account() — used by
+##     SnapKitService.switch_account() after link_account() returned
+##     "account_exists" — replaces local synced data with the existing
+##     account's blob for every key, EXCEPT bools, which OR (achievements /
+##     unlocks earned as a guest survive; a merge_policy of "remote" opts a
+##     bool out). Guest-only non-bool keys are dropped. "Never discard local
+##     progress" applies to the first sync and to linking a NEW provider
+##     account, not to switching to an existing one.
 ##   - BOOLS ARE MONOTONIC PROGRESS FLAGS on EVERY pull path (v0.2.1): a `true`
 ##     on either side stays true, including when only the remote changed (the
 ##     "take remote" path) — a remote `false` / missing key never re-locks an
@@ -101,6 +114,8 @@ const APPLIED_NONE := "none"
 const APPLIED_LOCAL := "local"
 const APPLIED_REMOTE := "remote"
 const APPLIED_MERGED := "merged"
+## switch_account -> adopt_account(): the existing account's save won (D36).
+const APPLIED_ACCOUNT := "account"
 
 ## func(local: Dictionary, remote: Dictionary) -> Dictionary over the `data`
 ## maps. An invalid/empty Callable (or a non-Dictionary return) means
@@ -193,6 +208,7 @@ func pull() -> Dictionary:
 	if not is_enabled():
 		return _disabled({"applied": APPLIED_NONE})
 	await _lock()
+	bind_user(_storage.user_id())
 	var res: Dictionary = await _pull_locked(0)
 	_unlock()
 	return res
@@ -207,6 +223,7 @@ func push() -> Dictionary:
 	if _timer != null:
 		_timer.stop()
 	await _lock()
+	bind_user(_storage.user_id())
 	var res: Dictionary
 	var local := export_local()
 	if not bool(_state.get("has_synced", false)):
@@ -483,7 +500,11 @@ func _resolve(local: Dictionary, remote: Dictionary, remote_is_newer: bool) -> D
 	return default_merge(local, remote, remote_is_newer)
 
 
-func _import_local(data: Dictionary) -> void:
+## drop_exact: also remove exact sync_keys that `data` lacks (switch_account).
+## Needs a store whose import_prefix accepts `replace`; the key's siblings
+## (other keys starting with the same text) are re-imported unchanged, so only
+## the exact key goes.
+func _import_local(data: Dictionary, drop_exact: bool = false) -> void:
 	var before := export_local()
 	var can_replace := _import_arity() >= 3
 	_importing = true
@@ -507,6 +528,16 @@ func _import_local(data: Dictionary) -> void:
 			_store.call("import_prefix", k, {k: data[k]}, false)
 		else:
 			_store.call("import_prefix", k, {k: data[k]})
+	if drop_exact and can_replace:
+		for k in sync_keys():
+			if data.has(k) or _under_prefix(k) or not before.has(k):
+				continue
+			var siblings: Variant = _store.call("export_prefix", k)
+			var keep := {}
+			if siblings is Dictionary:
+				keep = (siblings as Dictionary).duplicate()
+				keep.erase(k)
+			_store.call("import_prefix", k, keep, true)
 	_importing = false
 	var keys := changed_keys(before, export_local())
 	if not keys.is_empty():
@@ -585,6 +616,91 @@ func _unlock() -> void:
 	_idle.emit()
 
 
+## Bind the bookkeeping to `uid` (the current session user). A different
+## non-empty user than the one recorded resets everything but the device id;
+## "" (signed out) resets too. A state with no recorded user (written before
+## 0.2.2) is adopted by the first user seen. Returns true when it reset.
+func bind_user(uid: String) -> bool:
+	var recorded := str(_state.get("user_id", ""))
+	if uid == recorded:
+		return false
+	if recorded == "" and uid != "":
+		_state["user_id"] = uid
+		_save_state()
+		return false
+	reset_state(uid)
+	return true
+
+
+## Forget all sync bookkeeping (CAS, version, has_synced, hashes, times) and
+## record `uid` as the owner. The device id is kept. Persists when online.
+func reset_state(uid: String = "") -> void:
+	var device := str(_state.get("device_id", ""))
+	_state = {"device_id": device, "user_id": uid}
+	_dirty = false
+	_save_state()
+
+
+## The Snapser user these bookkeeping fields belong to ("" = none yet).
+func state_user_id() -> String:
+	return str(_state.get("user_id", ""))
+
+
+## SWITCH TO AN EXISTING ACCOUNT (D36): the account's remote save wins for
+## every key except bools, which OR (unless merge_policy says "remote" for that
+## key). Resets the bookkeeping to the current session user first, imports the
+## result (replacing guest data), records the account's CAS / version, and
+## pushes back only if OR-ed flags changed the data. No blob on the account ->
+## only the guest's `true` flags are kept. COROUTINE.
+## -> {ok, status, json, error, applied:"account", dropped:PackedStringArray}
+func adopt_account() -> Dictionary:
+	if not is_enabled():
+		return _disabled({"applied": APPLIED_NONE})
+	await _lock()
+	reset_state(_storage.user_id())
+	var got: Dictionary = await _storage.get_json_blob(blob_key(), access)
+	if not got.ok:
+		_unlock()
+		got["applied"] = APPLIED_NONE
+		return got
+	var local := export_local()
+	var remote: Dictionary = parse_envelope(got.value).data if got.exists else {}
+	var version: int = parse_envelope(got.value).version if got.exists else 0
+	var result := account_wins(local, remote, merge_policies())
+	var dropped := PackedStringArray()
+	for k in local:
+		if not result.has(k):
+			dropped.append(str(k))
+	dropped.sort()
+	_import_local(result, true)
+	var res: Dictionary
+	var now_local := export_local()
+	if got.exists and data_hash(now_local) == data_hash(remote):
+		_record_sync(str(got.cas), data_hash(now_local), version)
+		synced.emit("pull")
+		res = got
+	else:
+		res = await _push_locked(now_local, str(got.cas) if got.exists else "", version, 0)
+	_unlock()
+	return _with(res, {"applied": APPLIED_ACCOUNT, "dropped": dropped})
+
+
+## D36 rule as a pure function: `remote` (the account) for every key; bools
+## OR across both sides (a guest `true` survives, also when the account lacks
+## the key) unless policies[key] (exact or "prefix*") is "remote".
+static func account_wins(local: Dictionary, remote: Dictionary, policies: Dictionary = {}) -> Dictionary:
+	var out := remote.duplicate(true)
+	for k in local:
+		var lv: Variant = local[k]
+		if typeof(lv) != TYPE_BOOL or not lv:
+			continue
+		if policy_for(str(k), policies) == "remote":
+			continue
+		if not remote.has(k) or typeof(remote[k]) == TYPE_BOOL:
+			out[k] = true
+	return out
+
+
 func _load_state() -> void:
 	_state = {}
 	if FileAccess.file_exists(state_path):
@@ -598,6 +714,7 @@ func _load_state() -> void:
 				"has_synced": SnapKitJson.get_bool(parsed, "has_synced"),
 				"synced_at": SnapKitJson.get_int(parsed, "synced_at"),
 				"local_changed_at": SnapKitJson.get_int(parsed, "local_changed_at"),
+				"user_id": SnapKitJson.get_str(parsed, "user_id"),
 			}
 	if str(_state.get("device_id", "")) == "":
 		_state["device_id"] = Crypto.new().generate_random_bytes(8).hex_encode()

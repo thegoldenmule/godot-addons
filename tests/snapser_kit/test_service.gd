@@ -125,7 +125,7 @@ func test_automatic_analytics_events() -> void:
 
 func test_link_account_needs_bridge() -> void:
 	var mock := SnapKitMockGateway.new()
-	var svc := _service(mock_config(), mock)
+	var svc := _service(mock_config({"link_providers": ["apple"]}), mock)
 	await svc.boot_finished
 	check_eq((await svc.link_account("apple")).error, "no_provider", "no bridge")
 	svc.register_identity_provider("apple", FakeBridge.new({"ok": false, "error": "cancelled"}))
@@ -147,7 +147,7 @@ func test_link_then_switch_account() -> void:
 	mock.route(PUT, "/v1/auth/login/apple", func(_r: Dictionary) -> Dictionary:
 		return {"status": 200, "json": {"user": {"id": "existing", "created": false,
 			"session_token": mock.issue_session("existing"), "login_types": ["APPLE"]}}})
-	var svc := _service(mock_config(), mock)
+	var svc := _service(mock_config({"link_providers": ["apple"]}), mock)
 	await svc.boot_finished
 	var bridge := FakeBridge.new({"ok": true, "token": "apple-auth-code"})
 	svc.register_identity_provider("apple", bridge)
@@ -156,8 +156,17 @@ func test_link_then_switch_account() -> void:
 	check_eq(bridge.calls, 1, "bridge asked once")
 	var ids := []
 	svc.session_ready.connect(func(u: String) -> void: ids.append(u))
+	svc.cloud_save.bind_user(svc.user_id())
+	var st: Dictionary = svc.cloud_save.get("_state")
+	st["cas"] = "guest-cas"
+	st["version"] = 9
+	st["has_synced"] = true
 	var sw: Dictionary = await svc.switch_account(res)
 	check(sw.ok, "switched")
+	check_eq(svc.cloud_save.state_user_id(), "existing", "cloud-save state now belongs to the account")
+	check_eq([str(svc.cloud_save.get("_state").get("cas", "")), int(svc.cloud_save.get("_state").get("version", 0)),
+		bool(svc.cloud_save.get("_state").get("has_synced", false))], ["", 0, false],
+		"guest CAS / version / has_synced not carried over")
 	check_eq(svc.user_id(), "existing", "now the existing user")
 	check_eq(ids, ["existing"], "session_ready for the switched user")
 
@@ -432,3 +441,13 @@ func test_mock_online_runs_write_nothing_under_user() -> void:
 		svc.notification(Node.NOTIFICATION_APPLICATION_PAUSED)
 		await tree.process_frame
 	check_eq(_user_files(), before, "mock-online runs created/modified nothing under user://")
+
+
+func test_empty_link_providers_keeps_linking_off() -> void:
+	# D35 rollout: ship with "link_providers": [] until the platform side exists.
+	var svc := _service(mock_config({"link_providers": []}), SnapKitMockGateway.new())
+	await svc.boot_finished
+	var bridge := FakeBridge.new({"ok": true, "token": "t"})
+	svc.register_identity_provider("apple", bridge)
+	check_eq((await svc.link_account("apple")).error, "disabled", "linking off with []")
+	check_eq(bridge.calls, 0, "bridge never asked (no Apple sheet)")

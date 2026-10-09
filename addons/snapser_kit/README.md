@@ -76,7 +76,7 @@ When offline, every call returns `{ok:false, error:"offline"}` immediately, so g
 | Cloud save | `cloud_save_push()`, `cloud_save_pull()`. Override `_merge(local, remote)`. The default merges bools with OR, numbers with max and arrays with union; anything else takes the newer value. Set `save_store` (duck-typed `export_prefix` / `import_prefix` / optional `changed` signal) or rely on `/root/SaveService`. After a pull or merge, `cloud_save_applied(keys)` lists what changed locally; refresh caches from it. Synced keys are those under `sync_prefixes` plus the exact names in `sync_keys`. **Bools are monotonic progress flags on every pull path:** a `true` on either side stays `true`, even when only the remote changed. Per-key overrides go in `cloud_save.merge_policy`: `{"<key>" or "<prefix>*": "max" | "or" | "remote" | "local"}`. For example, `"sax_set_tutorial_seen": "remote"` opts a flag out. A pull adds and overwrites exact keys but never deletes them, and never touches siblings that merely start with the same text. |
 | Analytics | `track(event, props)`: queued and batched; never blocks. The kit sends `session_start`, `session_end` and `online_state` itself. |
 | Profile | `display_name()` (never empty), `set_display_name(name)`: trims, length-limits (3–16) and filters. Names are **not unique** (D33). |
-| Identity | `register_identity_provider(name, bridge)`, `link_account(provider)`, `switch_account(result)`, `linked_providers()` |
+| Identity | `register_identity_provider(name, bridge)`, `link_account(provider)`, `switch_account(result)`, `linked_providers()`. Linking is **off** unless `link_providers` lists the provider; `[]` returns `disabled` (D35). |
 | Quests | `quests_fetch_active/assign/increment/claim` (requires `"quests": true`) |
 
 Lower layers are public for advanced use:
@@ -103,6 +103,25 @@ Lower layers are public for advanced use:
   - Named Snapser codes (`SnapKitErrors`): `undeclared` (also stat 4000 / event 2000), `quest_not_claimable` (15014), `cas_conflict` (5007), `already_exists`, `not_found`, `invalid_property_value`, `anon_login_disabled`.
   - Otherwise `http_<status>`.
   - Client-level codes: `bad_response`, `invalid_argument`, `disabled`, `not_implemented`.
+
+### Whose progress wins (D36)
+
+| Situation | Result |
+|---|---|
+| **First sync** on a device (including progress from before Snapser) | Merged; local progress is **never discarded**. |
+| **Linking a NEW provider account** (`link_account` → ok) | The provider login joins the current anonymous user, so nothing changes and nothing is lost. |
+| **Switching to an EXISTING account** (`link_account` → `account_exists` → `switch_account`) | **The account wins.** Its cloud save replaces local synced data for every key, except bools, which OR: guest achievements and unlocks survive. Guest-only non-bool progress (wins, coins, levels) is dropped and listed in `result.cloud_save.dropped`. If the account has no save, only the guest's `true` flags are kept. |
+| Ordinary pulls afterwards | Monotonic bools plus the normal merge or take-remote rules. `merge_policy` applies. |
+
+Cloud-save bookkeeping (CAS token, version, `has_synced`) is **per user**. It's reset whenever the session user changes (`switch_account`, sign-out, a different login), so a switched session never reuses the previous user's state. Only the device id survives. Tell players before they switch: "This device will load your account's progress."
+
+### Rolling out linking (D35)
+
+1. Ship with `"link_providers": []`. `link_account()` returns `{ok:false, error:"disabled"}` and never opens a platform sheet.
+2. Enable **Sign in with Apple** on the App ID in the Apple Developer console **first**.
+3. Only then add the `com.apple.developer.applesignin` entitlement (see `snapser_kit_apple`). **An entitlement without the App ID capability breaks cloud signing**, so the TestFlight build fails to sign.
+4. Configure the Apple connector on the snapend. This is a post-ship apply, so it needs approval (D8).
+5. Set `"link_providers": ["apple"]` and ship.
 
 ### ⚠ `cloud_save_applied`: refresh game state before anything saves
 
