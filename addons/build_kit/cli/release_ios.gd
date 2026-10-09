@@ -9,7 +9,8 @@ extends SceneTree
 ## and adds what the dock leaves to a human: picking a build number App Store
 ## Connect hasn't seen, waiting for processing, and committing + pushing the
 ## next build_number. Prints one line per stage and a final summary line, and
-## exits non-zero on any failure. Never prints credentials: the stage shell
+## exits non-zero on any failure (Core.EXIT_*: 3 = uploaded and recorded, but
+## processing unconfirmed). Never prints credentials: the stage shell
 ## lines (which carry API-key flags) stay in the logs, and everything echoed
 ## is passed through Core.redact().
 
@@ -124,13 +125,20 @@ func _release() -> int:
 		await process_frame
 	var built_ok := bool(_result.get("ok", false))
 	entitlements = "verified" if _verified else ("FAILED" if str(_result.get("stage", "")) == "verify_entitlements" else "not reached")
-	var plist := ServiceT.read_plist_file(paths["info_plist"])
-	if plist["ok"]:
-		var shipped := str(plist["data"].get("CFBundleShortVersionString", ""))
-		if shipped != "" and shipped != version:
-			if version != "":
-				_line("version", "warn", "the exported Info.plist says %s, not %s" % [shipped, version])
-			version = shipped
+	# The archived app's Info.plist has the build settings expanded; the
+	# generated one only says $(MARKETING_VERSION) (Godot 4.7's template), which
+	# reconcile_version ignores — it must never reach the commit or ASC.
+	var shipped := ""
+	for plist_path in [paths["archived_app"].path_join("Info.plist"), paths["info_plist"]]:
+		var plist := ServiceT.read_plist_file(plist_path)
+		if plist["ok"]:
+			shipped = str(plist["data"].get("CFBundleShortVersionString", ""))
+			if shipped != "" and not Core.is_unresolved_setting(shipped):
+				break
+	var reconciled := Core.reconcile_version(version, shipped)
+	if str(reconciled["warn"]) != "":
+		_line("version", "warn", str(reconciled["warn"]))
+	version = str(reconciled["version"])
 	_cleanup(paths, before, not opts["upload"])
 	if not built_ok:
 		return _finish(false, version, str(build), asc_state, entitlements, commit)
@@ -173,12 +181,13 @@ func _release() -> int:
 	var poll: Dictionary = await _poll_processing(str(preset["bundle_id"]), version, build, int(opts["timeout_min"]))
 	asc_state = str(poll["state"]) if str(poll["state"]) != "" else "NOT_LISTED"
 	ok = ok and bool(poll["ok"])
-	return _finish(ok, version, str(build), asc_state, entitlements, commit)
+	return _finish(ok, version, str(build), asc_state, entitlements, commit, bool(poll.get("unconfirmed", false)))
 
 
-func _finish(ok: bool, version: String, build: String, asc_state: String, entitlements: String, commit: String) -> int:
-	print(Core.redact(Core.summary_line(ok, version, build, asc_state, entitlements, commit), _secrets))
-	return 0 if ok else 1
+func _finish(ok: bool, version: String, build: String, asc_state: String, entitlements: String, commit: String,
+		unconfirmed := false) -> int:
+	print(Core.redact(Core.summary_line(ok, version, build, asc_state, entitlements, commit, unconfirmed), _secrets))
+	return Core.exit_code(ok, unconfirmed)
 
 
 static func _yn(b: bool) -> String:
@@ -240,19 +249,26 @@ func _asc_call(command: String, bundle_id: String, extra: PackedStringArray) -> 
 	return ServiceT._parse_helper_json(Exec.read_all(h["log"]))
 
 
-## Polls until build `build` of `version` is VALID (ok), FAILED/INVALID, or the
-## timeout passes. Returns {ok, state}.
+## Polls until build `build` of `version` is VALID (ok), FAILED/INVALID (not
+## ok), or it stops watching: the timeout passes, or App Store Connect fails
+## MAX_POLL_FAILURES times in a row / permanently. Stopping is ok + unconfirmed
+## — the upload and the build-number commit already happened, so the run isn't
+## a failure, just not confirmed (exit 3). Returns {ok, state, unconfirmed}.
 func _poll_processing(bundle_id: String, version: String, build: int, timeout_min: int) -> Dictionary:
-	var extra := PackedStringArray(["--app-version", version]) if version != "" else PackedStringArray()
+	var extra := PackedStringArray(["--build-number", str(build)])
+	if version != "":
+		extra += PackedStringArray(["--app-version", version])
 	var start := Time.get_ticks_msec()
 	var deadline := start + timeout_min * 60000
 	var state := ""
 	var last := "-"
+	var failures := 0
 	_stage_started_ms = start
 	while true:
-		var asc: Dictionary = await _asc_call("build-numbers", bundle_id, extra)
+		var asc: Dictionary = await _asc_call("build-status", bundle_id, extra)
 		if asc.get("ok", false):
-			state = Core.build_state(asc.get("builds", []), build)
+			failures = 0
+			state = str(asc.get("state", Core.build_state(asc.get("builds", []), build)))
 			if state != last:
 				print("[processing] build %d: %s (%dm)" % [build, state if state != "" else "not listed yet",
 					int((Time.get_ticks_msec() - start) / 60000.0)])
@@ -260,18 +276,25 @@ func _poll_processing(bundle_id: String, version: String, build: int, timeout_mi
 			match Core.state_verdict(state):
 				"done":
 					_line("processing", "ok", "build %d is VALID (ready to test) after %ds" % [build, _elapsed_s()])
-					return {"ok": true, "state": state}
+					return {"ok": true, "state": state, "unconfirmed": false}
 				"failed":
 					_line("processing", "FAIL", "App Store Connect marked build %d %s — Apple emails the reason to the account holder" % [build, state])
-					return {"ok": false, "state": state}
+					return {"ok": false, "state": state, "unconfirmed": false}
 		else:
-			print(Core.redact("[processing] App Store Connect query failed (will retry): %s" % asc.get("error", "unknown"), _secrets))
+			failures += 1
+			var error := str(asc.get("error", "unknown")).replace("\r", "").replace("\n", " ").replace("\t", "")
+			if Core.poll_failure_verdict(asc, failures) == "give_up":
+				_line("processing", "WARN", "stopped watching after %d failed App Store Connect quer%s (%s). Build %d WAS uploaded and its build number recorded; processing is unconfirmed — check TestFlight (or the dock's TestFlight status) instead of re-running" % [
+					failures, "y" if failures == 1 else "ies", error.left(200), build])
+				return {"ok": true, "state": "UNCONFIRMED", "unconfirmed": true}
+			print(Core.redact("[processing] App Store Connect query failed (%d/%d, will retry): %s" % [
+				failures, Core.MAX_POLL_FAILURES, error.left(200)], _secrets))
 		if Time.get_ticks_msec() + int(POLL_INTERVAL_S * 1000) > deadline:
 			break
 		await create_timer(POLL_INTERVAL_S).timeout
-	_line("processing", "FAIL", "timed out after %d min with build %d %s — it was uploaded and recorded; check later with the dock's TestFlight status (or rerun with --timeout)" % [
+	_line("processing", "WARN", "timed out after %d min with build %d %s — it WAS uploaded and its build number recorded; processing is unconfirmed — check TestFlight later (the dock's TestFlight status) or rerun with a longer --timeout only if you need to wait" % [
 		timeout_min, build, state if state != "" else "not listed yet"])
-	return {"ok": false, "state": state if state != "" else "TIMEOUT"}
+	return {"ok": true, "state": state if state != "" else "TIMEOUT", "unconfirmed": true}
 
 
 # ── git ──
@@ -279,7 +302,11 @@ func _poll_processing(bundle_id: String, version: String, build: int, timeout_mi
 func _git(args: PackedStringArray) -> Dictionary:
 	OS.set_environment("GIT_TERMINAL_PROMPT", "0")  # fail, don't hang, on an auth prompt
 	var out: Array = []
-	var code := OS.execute("git", PackedStringArray(["-C", _project_dir]) + args, out, true)
+	# A captured OS.execute goes through popen + a shell: escape every arg, or
+	# a commit message holding $(…) loses it (0.3.0's empty version).
+	var argv := PackedStringArray(Array(PackedStringArray(["-C", _project_dir]) + args).map(
+		func(a): return Exec.popen_safe(str(a))))
+	var code := OS.execute("git", argv, out, true)
 	return {"code": code, "output": "".join(out.map(func(c): return str(c)))}
 
 

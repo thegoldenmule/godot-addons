@@ -8,7 +8,18 @@ extends RefCounted
 ## does no network I/O, so tools/verify_build_kit.gd exercises it headless.
 
 const CONFIG_FILE := "build_kit.config.json"
-const DEFAULT_TIMEOUT_MIN := 30
+const DEFAULT_TIMEOUT_MIN := 20
+## Consecutive failed App Store Connect queries before the processing poll
+## gives up (a permanent error — bad input, HTTP 4xx — gives up at once).
+const MAX_POLL_FAILURES := 5
+
+## Exit codes. UNCONFIRMED: uploaded and recorded (config written, committed
+## and pushed as asked) but processing wasn't seen to finish — the poll timed
+## out or App Store Connect kept failing. Nothing to redo; check TestFlight.
+const EXIT_OK := 0
+const EXIT_FAILED := 1
+const EXIT_USAGE := 2
+const EXIT_UNCONFIRMED := 3
 
 const USAGE := """Usage: addons/build_kit/cli/release_ios.sh [--project <dir>] [--no-upload] [--no-commit] [--no-push] [--timeout <minutes>]
 
@@ -20,8 +31,12 @@ processing, then commit + push the next build_number in build_kit.config.json.
   --no-upload        stop after the verified local .ipa (no ASC, no commit, no push)
   --no-commit        upload, but leave build_kit.config.json uncommitted (implies --no-push)
   --no-push          commit locally, don't push
-  --timeout <min>    how long to wait for App Store Connect processing (default 30)
-  -h, --help         this text"""
+  --timeout <min>    how long to wait for App Store Connect processing (default 20)
+  -h, --help         this text
+
+Exit status: 0 done (build VALID), 1 a stage failed, 2 usage error, 3 uploaded
+and recorded but processing unconfirmed (poll timed out or App Store Connect
+kept erroring) — don't re-run, check TestFlight."""
 
 
 # ── Arguments ─────────────────────────────────────────────────────────────────
@@ -108,6 +123,16 @@ static func build_state(builds: Array, build_number: int) -> String:
 	return ""
 
 
+## What the poll does after a failed App Store Connect query: "give_up" on a
+## permanent error (the helper's `permanent`: bad input or HTTP 4xx — the same
+## request can't succeed) or after MAX_POLL_FAILURES consecutive failures
+## (`consecutive` counts this one), else "retry".
+static func poll_failure_verdict(result: Dictionary, consecutive: int) -> String:
+	if bool(result.get("permanent", false)) or consecutive >= MAX_POLL_FAILURES:
+		return "give_up"
+	return "retry"
+
+
 ## What a processingState means for the poll: "done" (VALID), "failed"
 ## (FAILED/INVALID) or "wait" (PROCESSING, not listed yet, anything new).
 static func state_verdict(state: String) -> String:
@@ -117,6 +142,29 @@ static func state_verdict(state: String) -> String:
 		"FAILED", "INVALID":
 			return "failed"
 	return "wait"
+
+
+# ── Version ───────────────────────────────────────────────────────────────────
+
+## True for a value that is still an Xcode build-setting reference, e.g. the
+## `$(MARKETING_VERSION)` Godot 4.7's template leaves in the generated
+## Info.plist — not a version.
+static func is_unresolved_setting(value: String) -> bool:
+	return value.contains("$")
+
+
+## The version to report, commit and query App Store Connect with after the
+## build: the preflight version (preset short_version, else project version),
+## unless the built Info.plist resolved to a different real version. An
+## unresolved `$(…)` placeholder or an empty value never replaces it.
+## Returns {version, warn} — warn is "" or the mismatch to report.
+static func reconcile_version(preflight: String, shipped: String) -> Dictionary:
+	var s := shipped.strip_edges()
+	if s == "" or is_unresolved_setting(s) or s == preflight:
+		return {"version": preflight, "warn": ""}
+	if preflight == "":
+		return {"version": s, "warn": ""}
+	return {"version": s, "warn": "the built Info.plist says %s, not %s" % [s, preflight]}
 
 
 # ── Config write ──────────────────────────────────────────────────────────────
@@ -322,6 +370,14 @@ static func redact(text: String, secrets: Array) -> String:
 
 
 static func summary_line(ok: bool, version: String, build: String, asc_state: String,
-		entitlements: String, commit: String) -> String:
+		entitlements: String, commit: String, unconfirmed := false) -> String:
+	var status := ("UNCONFIRMED" if unconfirmed else "OK") if ok else "FAILED"
 	return "release_ios: %s  version=%s build=%s asc=%s entitlements=%s commit=%s" % [
-		"OK" if ok else "FAILED", version if version != "" else "?", build, asc_state, entitlements, commit]
+		status, version if version != "" else "?", build, asc_state, entitlements, commit]
+
+
+## Process exit code for a finished run (see EXIT_*): any failure wins.
+static func exit_code(ok: bool, unconfirmed := false) -> int:
+	if not ok:
+		return EXIT_FAILED
+	return EXIT_UNCONFIRMED if unconfirmed else EXIT_OK

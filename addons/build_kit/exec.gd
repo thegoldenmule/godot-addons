@@ -36,6 +36,17 @@ static func quote(arg: String) -> String:
 	return "'" + arg.replace("'", "'\\''") + "'"
 
 
+## `arg` made safe for a captured OS.execute on macOS/Linux. Godot runs that
+## through popen() on `"cmd" "arg" …`, so inside each double-quoted arg the
+## shell still expands $(…), $VAR and `…` and eats backslashes and quotes (a
+## commit message holding $(MARKETING_VERSION) came out empty). Escaping
+## \ " $ ` makes the shell pass `arg` through byte for byte. Windows: as is.
+static func popen_safe(arg: String) -> String:
+	if _is_windows():
+		return arg
+	return arg.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+
+
 static func command_line(args: PackedStringArray) -> String:
 	var parts := PackedStringArray()
 	for a in args:
@@ -151,7 +162,7 @@ static func run(args: PackedStringArray) -> Dictionary:
 	if _is_windows():
 		return _run_blocking_windows(args)
 	var out: Array = []
-	var code := OS.execute(_posix_shell(), ["-lc", command_line(args)], out, true)
+	var code := OS.execute(_posix_shell(), ["-lc", popen_safe(command_line(args))], out, true)
 	var text := ""
 	for chunk in out:
 		text += str(chunk)

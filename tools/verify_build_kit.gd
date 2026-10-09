@@ -1028,7 +1028,7 @@ func _verify_ios_signing() -> void:
 
 func _sh(line: String) -> Array:
 	var out: Array = []
-	var code := OS.execute("/bin/zsh", ["-c", "( %s ) 2>&1" % line], out)
+	var code := OS.execute("/bin/zsh", ["-c", Exec.popen_safe("( %s ) 2>&1" % line)], out)
 	return [code, "".join(out.map(func(c): return str(c)))]
 
 
@@ -1103,6 +1103,105 @@ func _clean_git() -> GitMock:
 		.base("rev-parse HEAD", 0, "abc123def4567890\n")
 
 
+## asc_helper.py's request construction and parsing, offline: get() and
+## make_token() are stubbed, so the exact /v1/builds paths it would send and
+## its JSON for a fixture response are checked without App Store Connect.
+const ASC_HELPER_TEST := """
+import contextlib, io, json, sys
+import asc_helper as h
+out = {}
+out['q_numbers'] = h.builds_query('APP', '1.3.0')
+out['q_status'] = h.builds_query('APP', '1.3.0', '7', limit=10)
+out['q_builds'] = h.builds_query('APP', limit=5)
+out['q_any'] = h.builds_query('APP')
+out['q_enc'] = h.builds_query('APP', '1.0&x=y')
+def rejects(fn, v):
+    try:
+        fn(v)
+        return False
+    except h.InputError:
+        return True
+out['bad_versions'] = [rejects(h.check_app_version, v) for v in ['$(MARKETING_VERSION)', '1.3.0.1', 'v1', ' 1.0']]
+out['good_versions'] = [rejects(h.check_app_version, v) for v in ['', '1', '1.3', '1.3.0']]
+out['bad_builds'] = [rejects(h.check_build_number, v) for v in ['', '$(CURRENT_PROJECT_VERSION)', 'seven']]
+FIX = {'data': [
+    {'type': 'builds', 'id': 'b2', 'attributes': {'version': '7', 'processingState': 'PROCESSING', 'uploadedDate': '2026-10-09T10:05:00-07:00'}},
+    {'type': 'builds', 'id': 'b1', 'attributes': {'version': '6', 'processingState': 'VALID', 'uploadedDate': '2026-10-08T09:00:00-07:00'}}],
+    'links': {'self': 'https://api.appstoreconnect.apple.com/v1/builds'}}
+out['parsed'] = h.parse_builds(FIX)
+calls = []
+def fake_get(token, path):
+    calls.append(path)
+    if path.startswith('/v1/apps?'):
+        return {'data': [{'type': 'apps', 'id': 'APP', 'attributes': {'bundleId': 'com.example.game', 'name': 'Game'}}]}
+    if 'filter[version]=7' in path:
+        return {'data': FIX['data'][:1]}
+    return FIX
+h.make_token = lambda *a: 'token'
+h.get = fake_get
+def run(argv):
+    sys.argv = ['asc_helper.py', '--key-path', 'k', '--key-id', 'K', '--issuer-id', 'I'] + argv
+    buf = io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(buf):
+        try:
+            h.main()
+        except SystemExit as e:
+            code = e.code
+    return [code, json.loads(buf.getvalue().strip().splitlines()[-1])]
+out['status'] = run(['--app-version', '1.3.0', '--build-number', '7', 'build-status', 'com.example.game'])
+out['status_calls'] = calls[:]
+del calls[:]
+out['numbers'] = run(['--app-version', '1.3.0', 'build-numbers', 'com.example.game'])
+out['numbers_calls'] = calls[:]
+del calls[:]
+out['placeholder'] = run(['--app-version', '$(MARKETING_VERSION)', '--build-number', '7', 'build-status', 'com.example.game'])
+out['placeholder_numbers'] = run(['--app-version', '$(MARKETING_VERSION)', 'build-numbers', 'com.example.game'])
+out['placeholder_calls'] = calls[:]
+out['permanent'] = [h.is_permanent_http(c) for c in (400, 404, 408, 429, 500, 503)]
+print(json.dumps(out))
+"""
+
+
+func _verify_asc_helper() -> void:
+	var r := _sh("cd %s && python3 -B -c %s" % [Exec.quote(ProjectSettings.globalize_path("res://addons/build_kit")),
+		Exec.quote(ASC_HELPER_TEST)])
+	var o: Variant = JSON.parse_string(str(r[1]).strip_edges().get_slice("\n", str(r[1]).strip_edges().count("\n")))
+	if r[0] != 0 or not o is Dictionary:
+		_check("asc_helper offline tests ran", false, str(r))
+		return
+	var fields := "&sort=-uploadedDate&limit=%d&fields[builds]=version,processingState,uploadedDate"
+	_check("asc_helper: build-numbers query", o["q_numbers"]
+		== "/v1/builds?filter[app]=APP&filter[preReleaseVersion.version]=1.3.0" + fields % 200, str(o["q_numbers"]))
+	_check("asc_helper: build-status query filters the build number + version", o["q_status"]
+		== "/v1/builds?filter[app]=APP&filter[version]=7&filter[preReleaseVersion.version]=1.3.0" + fields % 10, str(o["q_status"]))
+	_check("asc_helper: dock builds query", o["q_builds"] == "/v1/builds?filter[app]=APP" + fields % 5, str(o["q_builds"]))
+	_check("asc_helper: no version = no version filter", o["q_any"] == "/v1/builds?filter[app]=APP" + fields % 200, str(o["q_any"]))
+	_check("asc_helper: filter values are percent-encoded", str(o["q_enc"]).contains("filter[preReleaseVersion.version]=1.0%26x%3Dy&"), str(o["q_enc"]))
+	_check("asc_helper: rejects $(MARKETING_VERSION) and other non-versions", o["bad_versions"] == [true, true, true, true], str(o["bad_versions"]))
+	_check("asc_helper: accepts real versions (and none)", o["good_versions"] == [false, false, false, false], str(o["good_versions"]))
+	_check("asc_helper: rejects non-integer build numbers", o["bad_builds"] == [true, true, true], str(o["bad_builds"]))
+	_check("asc_helper: parses a /v1/builds response", JSON.stringify(o["parsed"]) == JSON.stringify([
+		{"version": "7", "state": "PROCESSING", "uploaded": "2026-10-09T10:05:00-07:00"},
+		{"version": "6", "state": "VALID", "uploaded": "2026-10-08T09:00:00-07:00"}]), str(o["parsed"]))
+	var st: Array = o["status"]
+	_check("asc_helper: build-status → state of the build", int(st[0]) == 0 and st[1]["ok"] and st[1]["found"]
+		and st[1]["state"] == "PROCESSING" and st[1]["build_number"] == "7", str(st))
+	_check("asc_helper: build-status sends app lookup + the filtered builds query",
+		o["status_calls"].size() == 2 and str(o["status_calls"][0]).begins_with("/v1/apps?filter[bundleId]=com.example.game")
+		and o["status_calls"][1] == "/v1/builds?filter[app]=APP&filter[version]=7&filter[preReleaseVersion.version]=1.3.0" + fields % 10,
+		str(o["status_calls"]))
+	var nb: Array = o["numbers"]
+	_check("asc_helper: build-numbers → highest", int(nb[0]) == 0 and nb[1]["ok"] and int(nb[1]["highest"]) == 7
+		and o["numbers_calls"][1] == "/v1/builds?filter[app]=APP&filter[preReleaseVersion.version]=1.3.0" + fields % 200, str(nb))
+	var ph: Array = o["placeholder"]
+	var phn: Array = o["placeholder_numbers"]
+	_check("asc_helper: an unexpanded $(MARKETING_VERSION) fails fast + permanent, never sent (the 0.3.0 HTTP 500)",
+		int(ph[0]) == 1 and not ph[1]["ok"] and ph[1]["permanent"] and str(ph[1]["error"]).contains("MARKETING_VERSION")
+		and int(phn[0]) == 1 and phn[1]["permanent"] and o["placeholder_calls"].is_empty(), str([ph, phn, o["placeholder_calls"]]))
+	_check("asc_helper: permanent = 4xx except 408/429", o["permanent"] == [true, true, false, false, false, false], str(o["permanent"]))
+
+
 func _verify_release_cli() -> void:
 	# argument parsing
 	var d := Release.parse_args(PackedStringArray())
@@ -1154,6 +1253,44 @@ func _verify_release_cli() -> void:
 	var py := _sh("cd %s && python3 -B -c %s" % [Exec.quote(ProjectSettings.globalize_path("res://addons/build_kit")),
 		Exec.quote("import asc_helper as h; print(h.highest_build_number([{'version':'7'},{'version':'12'},{'version':'1.0.3'}]), h.highest_build_number([]))")])
 	_check("asc_helper highest_build_number", py[0] == 0 and str(py[1]).strip_edges() == "12 0", str(py))
+	_verify_asc_helper()
+
+	# processing poll: bounded failures, exit codes
+	_check("poll: a transient failure is retried", Release.poll_failure_verdict({"ok": false, "error": "HTTP 500: x"}, 1) == "retry")
+	_check("poll: gives up after MAX_POLL_FAILURES consecutive failures", Release.MAX_POLL_FAILURES == 5
+		and Release.poll_failure_verdict({"ok": false}, Release.MAX_POLL_FAILURES - 1) == "retry"
+		and Release.poll_failure_verdict({"ok": false}, Release.MAX_POLL_FAILURES) == "give_up")
+	_check("poll: a permanent error gives up at once", Release.poll_failure_verdict({"ok": false, "permanent": true}, 1) == "give_up")
+	_check("poll: default timeout is 20 min", Release.DEFAULT_TIMEOUT_MIN == 20 and Release.USAGE.contains("default 20"))
+	_check("exit codes: ok 0, failed 1, unconfirmed 3 (failure wins)", Release.exit_code(true) == 0
+		and Release.exit_code(false) == 1 and Release.exit_code(true, true) == 3 and Release.exit_code(false, true) == 1
+		and Release.EXIT_UNCONFIRMED == 3 and Release.USAGE.contains("3 uploaded"))
+	var unc := Release.summary_line(true, "1.4", "42", "UNCONFIRMED", "verified", "abc", true)
+	_check("summary line: unconfirmed", unc.begins_with("release_ios: UNCONFIRMED  version=1.4"), unc)
+
+	# version: the commit/poll use the preflight version, never Info.plist's
+	# unexpanded $(MARKETING_VERSION) (0.3.0 committed "build: iOS  (1)")
+	var rv := Release.reconcile_version("1.3.0", "$(MARKETING_VERSION)")
+	_check("version: $(MARKETING_VERSION) keeps the preflight version", rv["version"] == "1.3.0" and rv["warn"] == "", str(rv))
+	_check("version: empty plist value keeps preflight", Release.reconcile_version("1.3.0", "")["version"] == "1.3.0")
+	_check("version: same value, no warning", Release.reconcile_version("1.3.0", "1.3.0") == {"version": "1.3.0", "warn": ""})
+	rv = Release.reconcile_version("1.3.0", "1.4.0")
+	_check("version: a different real built version wins, with a warning", rv["version"] == "1.4.0" and str(rv["warn"]).contains("1.3.0"), str(rv))
+	_check("version: fills an unset preflight version", Release.reconcile_version("", "2.0")["version"] == "2.0")
+	var preflight_version := ServiceT.marketing_version({"short_version": ""}, "1.3.0")
+	var cm := Release.commit_message(Release.reconcile_version(preflight_version, "$(MARKETING_VERSION)")["version"], 1, 2)
+	_check("commit message carries the preflight version (preset short_version empty → project version)",
+		cm == "build: iOS 1.3.0 (1) uploaded to TestFlight; next build_number 2", cm)
+
+	# git args survive Godot's popen-based OS.execute byte for byte
+	var nasty := "build: iOS $(MARKETING_VERSION) `x` $HOME \\ \"q\" 's'"
+	if OS.get_name() != "Windows":
+		_check("popen_safe escapes \\ \" $ `", Exec.popen_safe("a$b`c\"d\\e") == "a\\$b\\`c\\\"d\\\\e", Exec.popen_safe("a$b`c\"d\\e"))
+		var echo_out: Array = []
+		OS.execute("printf", PackedStringArray([Exec.popen_safe("%s"), Exec.popen_safe(nasty)]), echo_out, true)
+		_check("popen_safe: a commit message round-trips through OS.execute", "".join(echo_out) == nasty, str(echo_out))
+		var run := Exec.run(PackedStringArray(["printf", "%s", nasty]))
+		_check("Exec.run passes $(…) through literally", int(run["code"]) == 0 and str(run["output"]) == nasty, str(run))
 
 	# config write
 	var two_space := "{\n  \"ios\": {\n    \"preset\": \"iOS\",\n    \"build_number\": 7\n  },\n  \"android\": {\"version_code\": 3}\n}\n"

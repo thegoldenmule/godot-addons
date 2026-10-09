@@ -75,7 +75,7 @@ release_ios.sh [--project <dir>] [--no-upload] [--no-commit] [--no-push] [--time
 | `--no-upload` | stop after the verified local `.ipa` (kept); no App Store Connect, commit or push |
 | `--no-commit` | upload, write the next `build_number`, but leave it uncommitted (implies `--no-push`) |
 | `--no-push` | commit locally, don't push |
-| `--timeout <min>` | how long to wait for App Store Connect processing (default 30) |
+| `--timeout <min>` | how long to wait for App Store Connect processing (default 20) |
 
 Godot comes from `$GODOT`, else `/Applications/Godot.app/Contents/MacOS/Godot`.
 The script runs `cli/release_ios.gd` headless, which drives this addon's own
@@ -91,7 +91,10 @@ The script runs `cli/release_ios.gd` headless, which drives this addon's own
    App Store Connect + 1)` (`asc_helper.py build-numbers`). An upload whose
    bump never got committed is skipped over instead of colliding. The version
    is the preset's `application/short_version`, else
-   `application/config/version`.
+   `application/config/version` — and that same version is what the commit
+   message and the processing poll use (the generated Info.plist only says
+   `$(MARKETING_VERSION)`; the archived app's expanded value overrides it only
+   when it is a real, different version).
 3. **export → patch → archive → embed_entitlements → export_ipa →
    verify_entitlements → upload** — the pipeline above; a missing
    entitlement fails here, before anything is uploaded.
@@ -103,9 +106,13 @@ The script runs `cli/release_ios.gd` headless, which drives this addon's own
    one `git fetch` + rebase of just that commit and one retry; it never
    force-pushes. This runs as soon as the upload succeeds, so the number is
    recorded even if processing later fails or times out.
-5. **Processing** — polls App Store Connect every 30 s until the build is
-   `VALID`; `FAILED`/`INVALID` or the timeout fails the run (the build stays
-   uploaded and recorded).
+5. **Processing** — polls App Store Connect every 30 s
+   (`asc_helper.py build-status`: `GET /v1/builds` filtered by the app, the
+   build number and the version) until the build is `VALID`;
+   `FAILED`/`INVALID` fails the run. The timeout, a permanent query error, or
+   5 consecutive failed queries (e.g. HTTP 500s) stop the poll with a `WARN`
+   and exit `3`: the build is uploaded and recorded, only processing is
+   unconfirmed — check TestFlight rather than re-running.
 6. **Cleanup** — removes the build outputs it created (Xcode project, archive,
    `.ipa`, check files) and keeps `logs/` next to them.
 
@@ -121,7 +128,9 @@ Output is one line per stage plus a final summary, e.g.
 release_ios: OK  version=1.0 build=42 asc=VALID entitlements=verified commit=1a2b3c4d5e6f
 ```
 
-Exit status: `0` success, `1` any failed stage, `2` usage error. Credentials
+Exit status: `0` success (build `VALID`), `1` any failed stage, `2` usage
+error, `3` uploaded and recorded but processing unconfirmed (summary line
+`release_ios: UNCONFIRMED …`). Credentials
 use the same resolution as the dock (process env → `.env`) and are never
 printed: the stage command lines (which carry API-key flags) stay in the
 logs, and everything echoed is redacted.

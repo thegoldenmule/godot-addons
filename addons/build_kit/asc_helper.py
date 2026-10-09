@@ -12,11 +12,17 @@ Usage:
   asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I check-app <bundle_id>
   asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I builds <bundle_id>
   asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I [--app-version V] build-numbers <bundle_id>
+  asc_helper.py --key-path AuthKey.p8 --key-id K --issuer-id I [--app-version V] --build-number N build-status <bundle_id>
+
+Errors print {"ok": false, "error": ..., "permanent": bool}; permanent means
+retrying the same request can't help (bad input, or an HTTP 4xx other than
+408/429), so a poller should stop instead of looping.
 """
 import argparse
 import base64
 import datetime
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -113,12 +119,52 @@ def find_apps(token: str, bundle_id: str) -> list:
 
 
 def app_builds(token: str, app_id: str) -> list:
-    data = get(
-        token,
-        "/v1/builds?filter[app]="
-        + app_id
-        + "&sort=-uploadedDate&limit=5&fields[builds]=version,processingState,uploadedDate",
-    )
+    return parse_builds(get(token, builds_query(app_id, limit=5)))
+
+
+BUILD_FIELDS = "version,processingState,uploadedDate"
+
+# CFBundleShortVersionString: one to three period-separated integers.
+APP_VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+){0,2}$")
+# CFBundleVersion: the same shape; build_kit itself only uploads plain integers.
+BUILD_NUMBER_RE = APP_VERSION_RE
+
+
+class InputError(ValueError):
+    """Bad arguments: Apple would reject (or 500 on) the request, so don't send it."""
+
+
+def check_app_version(app_version: str) -> None:
+    if app_version and not APP_VERSION_RE.match(app_version):
+        raise InputError(
+            "invalid --app-version %r: expected 1-3 dot-separated integers like 1.3.0"
+            " (an unexpanded Xcode build setting such as $(MARKETING_VERSION)?)" % app_version
+        )
+
+
+def check_build_number(build_number: str) -> None:
+    if not BUILD_NUMBER_RE.match(build_number or ""):
+        raise InputError("invalid --build-number %r: expected an integer like 42" % build_number)
+
+
+def builds_query(app_id: str, app_version: str = "", build_number: str = "", limit: int = 200) -> str:
+    """GET /v1/builds path for one app's builds, newest upload first.
+
+    app_version filters on filter[preReleaseVersion.version] (the marketing
+    version, CFBundleShortVersionString); build_number on filter[version] (the
+    build number, CFBundleVersion). Values are percent-encoded; the bracketed
+    parameter names are sent literally, as Apple's own examples do.
+    """
+    params = [("filter[app]", app_id)]
+    if build_number:
+        params.append(("filter[version]", build_number))
+    if app_version:
+        params.append(("filter[preReleaseVersion.version]", app_version))
+    params += [("sort", "-uploadedDate"), ("limit", str(limit)), ("fields[builds]", BUILD_FIELDS)]
+    return "/v1/builds?" + "&".join(k + "=" + urllib.parse.quote(v, safe=",") for k, v in params)
+
+
+def parse_builds(data: dict) -> list:
     return [
         {
             "version": b["attributes"]["version"],
@@ -133,22 +179,21 @@ def version_builds(token: str, app_id: str, app_version: str) -> list:
     """Up to 200 most recent builds of an app, optionally only those of one
     marketing version (CFBundleShortVersionString). Build numbers only have to
     be unique within a version, so that is the set the CLI picks from."""
-    path = (
-        "/v1/builds?filter[app]="
-        + app_id
-        + "&sort=-uploadedDate&limit=200&fields[builds]=version,processingState,uploadedDate"
-    )
-    if app_version:
-        path += "&filter[preReleaseVersion.version]=" + urllib.parse.quote(app_version, safe="")
-    data = get(token, path)
-    return [
-        {
-            "version": b["attributes"]["version"],
-            "state": b["attributes"]["processingState"],
-            "uploaded": b["attributes"].get("uploadedDate"),
-        }
-        for b in data.get("data", [])
-    ]
+    check_app_version(app_version)
+    return parse_builds(get(token, builds_query(app_id, app_version)))
+
+
+def numbered_builds(token: str, app_id: str, app_version: str, build_number: str) -> list:
+    """The build(s) numbered build_number (of app_version, when given) — what
+    the release CLI polls for processingState after an upload."""
+    check_app_version(app_version)
+    check_build_number(build_number)
+    return parse_builds(get(token, builds_query(app_id, app_version, build_number, limit=10)))
+
+
+def is_permanent_http(code: int) -> bool:
+    """4xx other than timeout/rate-limit: the same request will fail again."""
+    return 400 <= code < 500 and code not in (408, 429)
 
 
 def highest_build_number(builds: list) -> int:
@@ -170,7 +215,9 @@ def main() -> None:
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--issuer-id", required=True)
     parser.add_argument("--app-version", default="")
-    parser.add_argument("command", choices=["check-app", "builds", "build-numbers", "ensure-bundle-id", "team-info"])
+    parser.add_argument("--build-number", default="")
+    parser.add_argument("command", choices=["check-app", "builds", "build-numbers", "build-status",
+                                            "ensure-bundle-id", "team-info"])
     parser.add_argument("arg")
     args = parser.parse_args()
     try:
@@ -244,6 +291,7 @@ def main() -> None:
             # (ghost duplicates contribute nothing), plus the highest number:
             # the release CLI picks max(config, highest + 1) and polls the
             # uploaded build's processingState from the same list.
+            check_app_version(args.app_version)
             apps = find_apps(token, args.arg)
             if not apps:
                 print(json.dumps({"ok": True, "found": False, "highest": 0, "builds": []}))
@@ -257,12 +305,33 @@ def main() -> None:
             print(json.dumps({"ok": True, "found": True, "app_id": app_id,
                               "app_version": args.app_version,
                               "highest": highest_build_number(builds), "builds": builds}))
+        elif args.command == "build-status":
+            # The processing poll: just the uploaded build, looked up by its
+            # number (filter[version]) within its marketing version, across
+            # every exact-match app record.
+            check_app_version(args.app_version)
+            check_build_number(args.build_number)
+            apps = find_apps(token, args.arg)
+            if not apps:
+                print(json.dumps({"ok": True, "found": False, "state": "", "builds": []}))
+                return
+            builds = []
+            for a in apps:
+                builds.extend(numbered_builds(token, a["id"], args.app_version, args.build_number))
+            builds.sort(key=uploaded_at, reverse=True)
+            state = next((b["state"] for b in builds if str(b["version"]) == args.build_number), "")
+            print(json.dumps({"ok": True, "found": True, "app_version": args.app_version,
+                              "build_number": args.build_number, "state": state, "builds": builds}))
+    except InputError as e:
+        print(json.dumps({"ok": False, "permanent": True, "error": str(e)}))
+        sys.exit(1)
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:300]
-        print(json.dumps({"ok": False, "error": "HTTP %d: %s" % (e.code, body)}))
+        print(json.dumps({"ok": False, "permanent": is_permanent_http(e.code),
+                          "error": "HTTP %d: %s" % (e.code, body)}))
         sys.exit(1)
     except Exception as e:  # noqa: BLE001 - single JSON error contract
-        print(json.dumps({"ok": False, "error": str(e)}))
+        print(json.dumps({"ok": False, "permanent": False, "error": str(e)}))
         sys.exit(1)
 
 

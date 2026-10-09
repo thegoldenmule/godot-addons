@@ -597,7 +597,7 @@ static func read_plist_file(path: String) -> Dictionary:
 	if empty:
 		return {"ok": true, "data": {}}
 	var out: Array = []
-	var code := OS.execute("plutil", ["-convert", "json", "-o", "-", path], out, true)
+	var code := OS.execute("plutil", ["-convert", "json", "-o", "-", Exec.popen_safe(path)], out, true)
 	var text := "".join(out.map(func(c): return str(c)))
 	var data: Variant = JSON.parse_string(text) if code == 0 else null
 	if not data is Dictionary:
