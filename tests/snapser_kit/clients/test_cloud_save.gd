@@ -553,3 +553,82 @@ func test_policy_for_and_apply_policies() -> void:
 	var out := SnapKitCloudSave.apply_policies({"a": false, "n": 1}, {"a": true, "n": 4}, {"a": false, "n": 1})
 	check_eq(out, {"a": true, "n": 1}, "default: bool OR, others keep base")
 	check_eq(SnapKitCloudSave.apply_policies({"a": 1}, {"a": true}, {"a": 1}), {"a": 1}, "type mismatch untouched")
+
+
+# ---- v0.2.2: account wins on switch (D36), per-user bookkeeping ----------------
+
+func test_account_wins_rule() -> void:
+	var local := {"p_wins": 40, "p_list": [1, 2], "p_ach": true, "p_name": "guest",
+		"p_guest_only": 5, "p_guest_flag": true, "p_off": false, "p_opt_out": true}
+	var remote := {"p_wins": 7, "p_list": [3], "p_ach": false, "p_name": "acct", "p_acct_flag": true,
+		"p_opt_out": false}
+	var out := SnapKitCloudSave.account_wins(local, remote, {"p_opt_out": "remote"})
+	check_eq(out, {"p_wins": 7, "p_list": [3], "p_ach": true, "p_name": "acct", "p_acct_flag": true,
+		"p_guest_flag": true, "p_opt_out": false},
+		"account value for every key; bools OR (guest trues survive); guest non-bools dropped; 'remote' opts out")
+	check_eq(SnapKitCloudSave.account_wins({"p_n": true}, {"p_n": 3}), {"p_n": 3}, "type mismatch: account wins")
+
+
+func test_adopt_account_end_to_end() -> void:
+	var store := FakeSaveStore.new()
+	store.set_value("prog_wins", 40)
+	store.set_value("prog_ach_first", true)
+	store.set_value("prog_guest_only", 9)
+	var cs := _device(store)
+	check((await cs.pull()).ok, "guest synced as user-1")
+	check_eq(cs.state_user_id(), "user-1", "state owned by user-1")
+	# Switch to an existing account (user-2) that has its own save.
+	server.put_raw("user-2", "save_v1", SnapKitCloudSave.make_envelope(
+		{"prog_wins": 7, "prog_ach_first": false, "prog_ach_boss": true}, 5, "acct-device", 100))
+	_transport_of(cs).uid = "user-2"
+	var applied := []
+	cs.applied.connect(func(keys: PackedStringArray) -> void: applied.append(keys))
+	var r: Dictionary = await cs.adopt_account()
+	check(r.ok, "adopt ok")
+	check_eq(r.applied, SnapKitCloudSave.APPLIED_ACCOUNT, "applied=account")
+	check_eq(r.dropped, PackedStringArray(["prog_guest_only"]), "guest-only progress dropped")
+	check_eq(store.export_prefix("prog_"), {"prog_wins": 7, "prog_ach_first": true, "prog_ach_boss": true},
+		"account wins (40 -> 7), guest achievement kept by OR")
+	var remote := SnapKitCloudSave.parse_envelope(server.value_of("user-2", "save_v1"))
+	check_eq(remote.data, {"prog_wins": 7, "prog_ach_first": true, "prog_ach_boss": true}, "OR-ed flag pushed to the account")
+	check_eq(remote.version, 6, "pushed on top of the account's version 5")
+	check_eq(SnapKitCloudSave.parse_envelope(server.value_of("user-1", "save_v1")).data.get("prog_wins"), 40,
+		"guest's own blob untouched")
+	check_eq(applied.size(), 1, "cloud_save_applied fired")
+
+
+func test_switched_user_never_reuses_previous_cas_or_version() -> void:
+	var store := FakeSaveStore.new()
+	store.set_value("prog_a", 1)
+	var cs := _device(store)
+	await cs.pull()
+	store.set_value("prog_a", 2)
+	await cs.push()
+	var st: Dictionary = cs.get("_state")
+	var old_cas := str(st.cas)
+	check(old_cas != "" and int(st.version) >= 2 and bool(st.has_synced), "user-1 bookkeeping populated")
+	server.put_raw("user-2", "save_v1", SnapKitCloudSave.make_envelope({"prog_a": 1}, 1, "x", 100))
+	_transport_of(cs).uid = "user-2"
+	check(cs.bind_user("user-2"), "different user -> reset")
+	st = cs.get("_state")
+	check_eq([str(st.get("cas", "")), int(st.get("version", 0)), bool(st.get("has_synced", false)),
+		str(st.get("synced_hash", ""))], ["", 0, false, ""], "CAS / version / has_synced cleared")
+	check_eq(cs.state_user_id(), "user-2", "owned by user-2")
+	check(cs.device_id() != "", "device id kept")
+	var r: Dictionary = await cs.pull()
+	check(r.ok, "first pull as user-2 ok")
+	st = cs.get("_state")
+	var user2_cas := str(SnapKitJson.dig(server.blobs, ["user-2/private/save_v1", "cas"], ""))
+	check(str(st.cas) != old_cas, "never user-1's CAS")
+	check_eq(str(st.cas), user2_cas, "user-2's CAS")
+	check(not cs.bind_user("user-2"), "same user -> no reset")
+	check(cs.bind_user(""), "sign-out -> reset")
+	check_eq(str(cs.get("_state").get("cas", "")), "", "cleared on sign-out")
+
+
+func test_pre_022_state_is_adopted_by_first_user() -> void:
+	var store := FakeSaveStore.new()
+	var cs := _device(store)
+	cs.set("_state", {"device_id": "d", "cas": "c9", "version": 4, "has_synced": true})
+	check(not cs.bind_user("user-1"), "legacy state (no user) is adopted, not reset")
+	check_eq(str(cs.get("_state").cas), "c9", "kept")

@@ -299,6 +299,10 @@ func _finish_boot() -> void:
 
 
 func _on_session_changed(uid: String) -> void:
+	# Cloud-save bookkeeping is per user: a new user (switch, sign-out, a
+	# different login) never reuses the previous user's CAS / version.
+	if cloud_save != null:
+		cloud_save.bind_user(uid)
 	if uid == "":
 		_display_name = ""
 		_set_online(false, "signed_out")
@@ -497,13 +501,17 @@ func register_identity_provider(provider_name: String, bridge: Object) -> void:
 ## Link the current anonymous user to a platform account. provider: "apple" |
 ## "google". Awaits the registered bridge's identity token, then
 ## SnapKitAuth.link_provider(). No bridge -> {ok:false, error:"no_provider"}.
-## A provider not listed in config.link_providers (when that list is non-empty)
-## -> {ok:false, error:"unsupported_provider"}. -> {ok, error, provider}
+## Linking is OFF unless config.link_providers lists the provider (D35 rollout:
+## ship with [] until the platform side is ready) -> {ok:false,
+## error:"disabled"} for an empty list, "unsupported_provider" for an unlisted
+## one. -> {ok, error, provider}
 func link_account(provider: String) -> Dictionary:
 	var gate := _gate()
 	if not gate.is_empty():
 		return gate
-	if not config.link_providers.is_empty() and not config.link_providers.has(provider):
+	if config.link_providers.is_empty():
+		return SnapKitTransport.error_result(SnapKitTransport.ERR_DISABLED)
+	if not config.link_providers.has(provider):
 		return SnapKitTransport.error_result(SnapKitAuth.ERR_UNSUPPORTED_PROVIDER)
 	var bridge: Object = _identity_bridges.get(provider)
 	if bridge == null or not bridge.has_method("get_identity_token"):
@@ -518,8 +526,12 @@ func link_account(provider: String) -> Dictionary:
 
 ## Adopt an existing account after link_account() returned "account_exists".
 ## provider_session: that whole result (or its "switch_session" dict). The
-## session is persisted, the cached display name is refreshed, and the cloud
-## save is pulled (merging, never discarding, local progress).
+## session is persisted and the cached display name refreshed.
+## THE ACCOUNT WINS (D36): the cloud-save bookkeeping is reset to the new user
+## and the account's blob replaces local synced data for every key, except
+## bools, which OR (guest achievements / unlocks survive). Guest-only
+## non-bool progress is dropped (listed in cloud_save.dropped).
+## cloud_save_applied fires for the keys that changed.
 ## -> {ok, error, user_id, cloud_save?:Dictionary}
 func switch_account(provider_session: Dictionary) -> Dictionary:
 	var gate := _gate()
@@ -534,7 +546,7 @@ func switch_account(provider_session: Dictionary) -> Dictionary:
 	res["user_id"] = auth.user_id
 	await refresh_profile()
 	if cloud_save.is_enabled():
-		res["cloud_save"] = await cloud_save.pull()
+		res["cloud_save"] = await cloud_save.adopt_account()
 	return res
 
 

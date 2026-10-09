@@ -42,6 +42,11 @@ func _init(transport: SnapKitTransport) -> void:
 	_transport = transport
 
 
+## The session user the blobs belong to ("" before login).
+func user_id() -> String:
+	return _transport.user_id() if _transport != null else ""
+
+
 ## "/v1/storage/owner/{user_id}/<access>/json-blobs/<key>".
 static func json_blob_path(key: String, access: String = ACCESS_PRIVATE) -> String:
 	return "%s/%s/json-blobs/%s" % [BASE_PATH, access.uri_encode(), key.uri_encode()]

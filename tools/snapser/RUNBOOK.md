@@ -116,8 +116,15 @@ tools/snapser/smoke/run_smoke.sh path/to/snapser_kit.config.json --stat=hits --b
 - Keep `single_session_per_user` **false**. Otherwise a linked account used on two devices logs the other one out.
 - **Linking** (Wave 4): `login/{provider}` with `create_user=true`.
   - If the provider user is new, the kit associates it onto the anonymous user (keep = anon, discard = provider).
-  - If the provider account already exists, the kit returns `account_exists`, and the game may `switch_account()`.
+  - If the provider account already exists, the kit returns `account_exists`, and the game may `switch_account()`. **The account wins (D36):** its cloud save replaces the device's synced data for every key, except bools, which OR. Guest-only non-bool progress is dropped. "Never discard local progress" holds only for the first sync and for linking a *new* provider account.
+  - Cloud-save state (CAS, version, `has_synced`) is per user and resets on any user change, so it's never reused across accounts.
   - Apple sends the authorization code: single-use, never retried.
+- **Linking rollout (D35):**
+  1. Ship with `"link_providers": []`, which keeps linking off (`link_account` returns `disabled`).
+  2. Add the Sign in with Apple capability to the App ID.
+  3. Only then add the SIWA entitlement. An entitlement without the capability breaks cloud signing.
+  4. Configure the snapend's Apple connector. This apply needs approval post-ship.
+  5. Set `link_providers: ["apple"]`.
 
 ## Clearing test rows from a board
 
