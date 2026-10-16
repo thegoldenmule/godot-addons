@@ -13,3 +13,4 @@ __pycache__/
 # editor_tool_kit is the package manager — it stages every addon's update here,
 # so there is one staging dir regardless of how many addons are managed.
 editor_tool_kit_update/
+.env

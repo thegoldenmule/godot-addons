@@ -26,6 +26,7 @@ var _btn_ipa: Button
 var _btn_cancel: Button
 var _btn_tf_status: Button
 var _btn_install: Button
+var _btn_apk: Button
 var _btn_cancel_android: Button
 var _btn_itch_push: Button
 var _btn_itch_export: Button
@@ -102,14 +103,13 @@ func _build_android_tab() -> Control:
 	var btn_aab := Ui.button("▶ Build → Play Console", Callable(),
 		"Needs Gradle Build + the AAB pipeline — not built yet")
 	btn_aab.disabled = true  # TODO: analog of iOS's _btn_testflight
-	var btn_apk := Ui.button("Build .apk only", Callable(),
-		"Needs the Gradle build template — not built yet")
-	btn_apk.disabled = true  # TODO: analog of iOS's _btn_ipa
+	_btn_apk = Ui.button("▶ Build release APK", _on_build_android_release,
+		"Export a release-signed APK to disk (no install)")
 	var btn_keystore := Ui.button("Add release keystore…", Callable(),
 		"Release-keystore ingestion — not built yet")
 	btn_keystore.disabled = true  # TODO: analog of iOS's _make_asc_key_form
 	var build_col := VBoxContainer.new()
-	build_col.add_child(Ui.button_bar([_btn_install, _btn_cancel_android, btn_aab, btn_apk, btn_keystore]))
+	build_col.add_child(Ui.button_bar([_btn_install, _btn_cancel_android, btn_aab, _btn_apk, btn_keystore]))
 	return _make_platform_tab("android", "Android", "Build Android", build_col)
 
 
@@ -324,6 +324,12 @@ func _on_build_android() -> void:
 		_set_status("android", str(result.get("error", "")), Pal.ERROR, STATUS_TOAST_SECONDS)
 
 
+func _on_build_android_release() -> void:
+	var result: Dictionary = service.start_build_android_release()
+	if not result.get("ok", false):
+		_set_status("android", str(result.get("error", "")), Pal.ERROR, STATUS_TOAST_SECONDS)
+
+
 func _on_cancel_android() -> void:
 	service.cancel()
 
@@ -374,6 +380,7 @@ func _on_stage_changed(stage: String, platform: String) -> void:
 	_btn_ipa.disabled = busy
 	_btn_cancel.disabled = not busy
 	_btn_install.disabled = busy
+	_btn_apk.disabled = busy
 	_btn_cancel_android.disabled = not busy
 	_btn_itch_push.disabled = busy
 	_btn_itch_export.disabled = busy
@@ -752,6 +759,17 @@ func _on_fix(id: String, platform: String, fix_value: String) -> void:
 		EditorInterface.get_editor_settings().set_setting(ANDROID_EDITOR_SETTING_FIXES[id], fix_value)
 		_set_status(platform, "Editor Settings updated: %s" % fix_value, Pal.TEXT, STATUS_TOAST_SECONDS)
 		service.refresh_preflight()
+		return
+	if id == "android.release_keystore":
+		# keytool runs synchronously and briefly freezes the editor — paint a
+		# heads-up first. Yield real time (not one process_frame): the blocking
+		# call would otherwise stall the main loop before the label's redraw runs.
+		_set_status(platform, "Generating release keystore — the editor will pause for a few seconds…", Pal.TEXT)
+		await get_tree().create_timer(0.1).timeout
+		var jdk_path := _editor_setting(EditorInterface.get_editor_settings(), ANDROID_JDK_KEY)
+		var ks_result: Dictionary = service.apply_fix(id, {"jdk_path": jdk_path})
+		_set_status(platform, str(ks_result.get("message", ks_result.get("error", ""))),
+			Pal.TEXT if ks_result.get("ok", false) else Pal.ERROR, STATUS_TOAST_SECONDS)
 		return
 	var result: Dictionary = service.apply_fix(id, {"team_id": _selected_team} if id == "ios.preset" else {})
 	_set_status(platform, str(result.get("message", result.get("error", ""))),

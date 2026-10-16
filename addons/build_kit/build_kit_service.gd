@@ -51,6 +51,7 @@ var _active_platform := ""       # platform owning the current build ("" = idle)
 var _proc := {}                  # active Exec.spawn handle (+offset)
 var _upload := false
 var _build_number := 0           # CFBundleVersion of the running iOS build
+var _android_release := false    # release-APK export (finishes at disk, no install)
 var _context := {}               # bundle_id / team_id for classify + guidance
 var _preset := {}                # parsed iOS preset (cached at build start)
 
@@ -91,7 +92,6 @@ static func default_config() -> Dictionary:
 		},
 		"android": {
 			"preset": "Android",
-			"version_code": 1,
 		},
 		# user/game = the itch.io page (https://<user>.itch.io/<game>). channels
 		# empty = auto-discover from export presets (Web→html5, Windows
@@ -107,10 +107,9 @@ static func default_config() -> Dictionary:
 
 
 ## Fields JSON parses as floats but that must round-trip as ints (CFBundleVersion
-## "2" not "2.0"; same for Android's versionCode).
+## "2" not "2.0").
 const INT_CONFIG_FIELDS := [
 	["ios", "build_number"],
-	["android", "version_code"],
 ]
 
 
@@ -215,6 +214,36 @@ static func parse_env(text: String) -> Dictionary:
 		var value := s.substr(eq + 1).strip_edges().trim_prefix("\"").trim_suffix("\"")
 		out[key] = value
 	return out
+
+
+# ── Release keystore (.env) ───────────────────────────────────────────────────
+#
+# These env vars override the preset's keystore/release fields, so the password
+# lives in the gitignored .env and never in the committed export_presets.cfg.
+
+const RELEASE_KEYSTORE_ENV := [
+	["path", "GODOT_ANDROID_KEYSTORE_RELEASE_PATH"],
+	["user", "GODOT_ANDROID_KEYSTORE_RELEASE_USER"],
+	["password", "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD"],
+]
+
+## {path, user, password} for the release key: environment, then repo .env ("" =
+## unset). A leading ~ in the path expands via HOME.
+func android_release_keystore() -> Dictionary:
+	var env := {}
+	for env_path in ENV_PATHS:
+		if FileAccess.file_exists(env_path):
+			var f := FileAccess.open(env_path, FileAccess.READ)
+			env.merge(parse_env(f.get_as_text()))
+	var creds := {}
+	for pair in RELEASE_KEYSTORE_ENV:
+		var value := OS.get_environment(str(pair[1]))
+		if value == "":
+			value = str(env.get(pair[1], ""))
+		creds[pair[0]] = value
+	if str(creds["path"]).begins_with("~"):
+		creds["path"] = OS.get_environment("HOME") + str(creds["path"]).substr(1)
+	return creds
 
 
 # ── Secrets (.env) ────────────────────────────────────────────────────────────
@@ -652,6 +681,20 @@ static func make_export_options_xml(team_id: String, upload: bool) -> String:
 """ % [destination, team_id]
 
 
+## Increment version/code in the preset's options and return the new value (-1 on
+## failure). The preset is the single source of truth for the release code; an
+## unset value counts from 1. Path overridable for the verifier.
+static func _bump_preset_version_code(section: String, path := "res://export_presets.cfg") -> int:
+	var cfg := ConfigFile.new()
+	if cfg.load(path) != OK:
+		return -1
+	var next := int(cfg.get_value(section + ".options", "version/code", 1)) + 1
+	cfg.set_value(section + ".options", "version/code", next)
+	if cfg.save(path) != OK:
+		return -1
+	return next
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 func is_busy() -> bool:
@@ -715,10 +758,9 @@ func start_build(upload := true, build_number := 0) -> Dictionary:
 	return ok({"stages": _stages.size() + 1, "build_number": build_number})
 
 
-## Export a debug APK and adb install it. sdk_path/serial come from the dock
-## (EditorSettings and the device picker aren't reachable from here); device
-## state is re-checked fresh rather than trusted.
-func start_build_android(sdk_path: String, serial := "") -> Dictionary:
+## Busy check + load/validate the Android preset, shared by both build paths.
+## Returns {} when clear (_preset loaded), else an err dict to return as-is.
+func _android_build_preflight() -> Dictionary:
 	if is_busy():
 		return err("A build is already running (stage: %s)." % _stage)
 	load_config()
@@ -727,6 +769,16 @@ func start_build_android(sdk_path: String, serial := "") -> Dictionary:
 		return err("No Android export preset found. Create one in Project → Export (platform Android), then Refresh preflight.")
 	if not is_apk_export_path(str(_preset["export_path"])):
 		return err("The Android export preset needs an export path ending in .apk. Press Fix on the preflight 'Android export preset' row.")
+	return {}
+
+
+## Export a debug APK and adb install it. sdk_path/serial come from the dock
+## (EditorSettings and the device picker aren't reachable from here); device
+## state is re-checked fresh rather than trusted.
+func start_build_android(sdk_path: String, serial := "") -> Dictionary:
+	var guard := _android_build_preflight()
+	if not guard.is_empty():
+		return guard
 
 	var adb := resolve_adb_path(sdk_path)
 	var devices := parse_adb_devices(str(Exec.run(PackedStringArray([adb, "devices", "-l"]))["output"]))
@@ -760,6 +812,45 @@ func start_build_android(sdk_path: String, serial := "") -> Dictionary:
 		},
 	]
 	_next_stage(paths)
+	return ok({"stages": _stages.size() + 1})
+
+
+## Export a release-signed APK to disk — one stage, no install. The release key
+## comes from the .env; Godot reads it from GODOT_ANDROID_KEYSTORE_RELEASE_* at
+## export, so we set those on our own process and let the spawned export inherit
+## them (the password never reaches a shell line or the log).
+func start_build_android_release() -> Dictionary:
+	var guard := _android_build_preflight()
+	if not guard.is_empty():
+		return guard
+	var ks := android_release_keystore()
+	if str(ks["path"]) == "" or str(ks["user"]) == "" or str(ks["password"]) == "":
+		return err("No release keystore configured. See the Release keystore preflight row — press Fix to generate one.")
+	if not FileAccess.file_exists(str(ks["path"])):
+		return err("The release keystore file is missing (%s). Re-generate or re-add it from the Release keystore row." % ks["path"])
+
+	for pair in RELEASE_KEYSTORE_ENV:
+		OS.set_environment(str(pair[1]), str(ks[pair[0]]))
+
+	var root := ProjectSettings.globalize_path("res://")
+	var paths := derive_paths(root, _preset["export_path"], "Android")
+	_context = {}
+	_active_platform = "android"
+	_android_release = true
+	_stages = [
+		{
+			"name": "export",
+			"shell": Exec.command_line(PackedStringArray([
+				OS.get_executable_path(), "--headless", "--path", root,
+				"--export-release", _preset["name"], paths["out"],
+			])),
+		},
+	]
+	_next_stage(paths)
+	# Clear them now the spawned export has inherited them — otherwise
+	# android_release_keystore()'s env-first read shadows .env on the next build.
+	for pair in RELEASE_KEYSTORE_ENV:
+		OS.unset_environment(str(pair[1]))
 	return ok({"stages": _stages.size() + 1})
 
 
@@ -810,6 +901,12 @@ func _next_stage(paths: Dictionary = {}) -> void:
 			})
 		elif _active_platform == "itch":
 			_finish(_itch_success_result())
+		elif _android_release:
+			if _bump_preset_version_code(str(_preset["section"])) < 0:
+				push_warning("build_kit: couldn't bump version/code in the preset")
+			_finish({"ok": true, "title": "Signed release APK exported",
+				"guidance": "The release APK is in %s." % paths["dir"],
+				"links": [{"label": "Open folder", "url": paths["dir"]}]})
 		else:
 			_finish({"ok": true, "title": "Installed on device",
 				"guidance": "The APK is installed — check the device."})
@@ -924,6 +1021,7 @@ func _finish(result: Dictionary) -> void:
 	_stage = ""
 	_stage_def = {}
 	_active_platform = ""
+	_android_release = false
 	_proc = {}
 	_itch_build = {}
 	build_finished.emit(result, platform)
@@ -1845,6 +1943,8 @@ func refresh_preflight() -> void:
 	rows.append(_check_devices())
 	rows.append(_check_android_templates())
 	rows.append(_check_android_preset())
+	var rk := android_release_keystore()
+	rows.append(_check_android_release_keystore(str(rk["path"]), str(rk["user"]), str(rk["password"])))
 	rows.append_array(_itch_rows())
 	preflight_rows = rows
 	preflight_changed.emit(rows)
@@ -2281,6 +2381,23 @@ func _check_android_debug_keystore(keystore_path: String, keystore_user: String,
 		"Godot creates this automatically on first export, using the JDK configured above. Nothing to do here yet — Refresh after your first export to confirm it was created.")
 
 
+## Parallel to the debug-keystore check but fed from android_release_keystore()'s
+## env trio. All-or-nothing; "none set" is a warn (only a release APK needs it).
+func _check_android_release_keystore(keystore_path: String, keystore_user: String, keystore_pass: String) -> Dictionary:
+	var configured := int(keystore_path != "") + int(keystore_user != "") + int(keystore_pass != "")
+	if configured == 0:
+		return _row("android.release_keystore", "Release keystore", "warn", "not configured",
+			"Only needed to build a release APK — the debug device install doesn't use it. Press Fix to generate one (random upload-key password, saved to .env), or add an existing keystore from the Android build controls.",
+			true)
+	if configured != 3:
+		return _row("android.release_keystore", "Release keystore", "fail", "incomplete config",
+			"A release keystore needs all three of GODOT_ANDROID_KEYSTORE_RELEASE_PATH / _USER / _PASSWORD in your .env, or none of them. Re-add the keystore from the Android build controls.")
+	if not FileAccess.file_exists(keystore_path):
+		return _row("android.release_keystore", "Release keystore", "fail", _toolchain_path_detail(keystore_path),
+			"GODOT_ANDROID_KEYSTORE_RELEASE_PATH points at a file that doesn't exist — re-generate or re-add the keystore from the Android build controls.")
+	return _row("android.release_keystore", "Release keystore", "ok", keystore_path)
+
+
 ## Confirms an Android export preset exists, has its required base config
 ## keys, and has an export_path Godot can actually write an APK to.
 func _check_android_preset() -> Dictionary:
@@ -2585,6 +2702,106 @@ func set_asc_issuer(issuer: String) -> Dictionary:
 	return ok({"message": "Issuer ID saved to %s." % env_file})
 
 
+# ── Release keystore generation ───────────────────────────────────────────────
+
+## Random keystore password from the crypto RNG. Only ever lives in .env, never
+## typed — this is the resettable Play upload key.
+static func random_password(length := 24) -> String:
+	var alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	var bytes := Crypto.new().generate_random_bytes(length)
+	var out := ""
+	for b in bytes:
+		out += alphabet[b % alphabet.length()]
+	return out
+
+
+## keytool ships in the JDK, not reliably on PATH — prefer <jdk>/bin/keytool,
+## else the bare name (mirrors resolve_adb_path).
+static func resolve_keytool_path(jdk_path: String) -> String:
+	var exe_name := "keytool.exe" if OS.get_name() == "Windows" else "keytool"
+	if jdk_path != "":
+		var candidate := jdk_path.path_join("bin").path_join(exe_name)
+		if FileAccess.file_exists(candidate):
+			return candidate
+	return exe_name
+
+
+## Generated release keystore + upload cert: beside Godot's debug keystore (out
+## of the repo, cross-platform), named per project.
+static func release_keystore_dir() -> String:
+	return OS.get_data_dir().path_join("godot/keystores")
+
+
+static func release_keystore_path() -> String:
+	return release_keystore_dir().path_join(clean_app_name() + "_release.keystore")
+
+
+static func upload_cert_path() -> String:
+	return release_keystore_dir().path_join(clean_app_name() + "_upload_cert.pem")
+
+
+## keytool -genkeypair for the upload key. Long validity so the key outlives the
+## app; dname is cosmetic (Play identifies the key by fingerprint).
+static func keytool_genkeypair_args(keytool: String, keystore_path: String, alias: String, password: String, dname: String) -> PackedStringArray:
+	return PackedStringArray([
+		keytool, "-genkeypair", "-v",
+		"-keystore", keystore_path,
+		"-alias", alias,
+		"-keyalg", "RSA", "-keysize", "2048",
+		"-validity", "10000",
+		"-storepass", password, "-keypass", password,
+		"-dname", dname,
+	])
+
+
+## keytool -exportcert -rfc → the PEM upload cert, for one-time Play App Signing
+## registration.
+static func keytool_exportcert_args(keytool: String, keystore_path: String, alias: String, password: String, pem_path: String) -> PackedStringArray:
+	return PackedStringArray([
+		keytool, "-exportcert", "-rfc",
+		"-keystore", keystore_path, "-alias", alias,
+		"-storepass", password,
+		"-file", pem_path,
+	])
+
+
+## The android.release_keystore Fix: mint a keystore + save its creds to .env.
+## Synchronous — keytool is a bounded local call (the dock warns before the brief
+## freeze); refuses an existing file so a real signing key is never clobbered.
+## keystore_path is overridable for the verifier.
+func _fix_release_keystore(jdk_path: String, keystore_path := "") -> Dictionary:
+	if jdk_path == "":
+		return err("Configure the Java SDK path first — see the Java SDK preflight row.")
+	if keystore_path == "":
+		keystore_path = release_keystore_path()
+	if FileAccess.file_exists(keystore_path):
+		return err("A release keystore already exists at %s — generating a new one would orphan its signing identity. Remove it deliberately, or add it as an existing keystore, instead." % keystore_path)
+	var keytool := resolve_keytool_path(jdk_path)
+	var alias := "upload"
+	var password := random_password()
+	DirAccess.make_dir_recursive_absolute(keystore_path.get_base_dir())
+	var gen := Exec.run(keytool_genkeypair_args(keytool, keystore_path, alias, password, "CN=" + clean_app_name()))
+	if int(gen["code"]) != 0:
+		return err("keytool could not create the keystore: %s" % str(gen["output"]).strip_edges().left(300))
+	# Valid for signing now — record the creds before the (optional) cert export.
+	var env_file := write_env_vars({
+		"GODOT_ANDROID_KEYSTORE_RELEASE_PATH": keystore_path,
+		"GODOT_ANDROID_KEYSTORE_RELEASE_USER": alias,
+		"GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD": password,
+	})
+	if env_file == "":
+		return err("Keystore created at %s, but %s could not be written." % [keystore_path, env_write_path()])
+	var pem := upload_cert_path()
+	var cert := Exec.run(keytool_exportcert_args(keytool, keystore_path, alias, password, pem))
+	refresh_preflight()
+	var msg := "Release keystore created at %s; credentials saved to %s." % [keystore_path, env_file]
+	if int(cert["code"]) == 0:
+		msg += " Upload certificate: %s." % pem
+	else:
+		msg += " (Upload-certificate export failed — only needed for Play registration; re-run then.)"
+	return ok({"message": msg})
+
+
 # ── Fixes ─────────────────────────────────────────────────────────────────────
 
 ## The preset fix: writes export_project_only=true and, when the preset has no
@@ -2612,6 +2829,8 @@ func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 			return _fix_itch_channels()
 		"itch.web":
 			return _fix_itch_web()
+		"android.release_keystore":
+			return _fix_release_keystore(str(opts.get("jdk_path", "")))
 	return err("No fix for '%s'." % id)
 
 

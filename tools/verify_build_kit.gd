@@ -97,6 +97,13 @@ func _initialize() -> void:
 	_check("classify android install incompatible", android_incompatible["id"] == "install_update_incompatible", str(android_incompatible))
 	var android_on_ios := Classify.classify("adb: failed to install game.apk: INSTALL_FAILED_UPDATE_INCOMPATIBLE", {}, "ios")
 	_check("classify android rule doesn't match ios", android_on_ios["id"] == "unknown", str(android_on_ios))
+	var rel_ks := Classify.classify("ERROR: Release keystore incorrectly configured in the export preset.", {}, "android")
+	_check("classify release keystore misconfigured", rel_ks["id"] == "release_keystore_misconfigured", str(rel_ks))
+	# the wrong-password/alias failure emits a different string (verified against the 4.7.1 binary)
+	var rel_ks_pw := Classify.classify("ERROR: Export: Release Username and/or Password is invalid for the given Release Keystore\nERROR: Project export for preset \"Android\" failed.", {}, "android")
+	_check("classify release keystore wrong password", rel_ks_pw["id"] == "release_keystore_misconfigured", str(rel_ks_pw))
+	var rel_ks_ios := Classify.classify("Release keystore incorrectly configured in the export preset.", {}, "ios")
+	_check("classify release keystore rule is android-only", rel_ks_ios["id"] == "unknown", str(rel_ks_ios))
 	var neutral_templates := Classify.classify("No export template found for platform \"Android\".", {}, "android")
 	_check("classify unscoped rule matches android", neutral_templates["id"] == "no_export_templates", str(neutral_templates))
 	_check("classify no_export_templates wording is platform-neutral", not str(neutral_templates["guidance"]).contains("iOS"), str(neutral_templates))
@@ -120,6 +127,23 @@ func _initialize() -> void:
 		not android_preset.has("bundle_id") and not android_preset.has("team_id") and not android_preset.has("export_project_only"),
 		str(android_preset))
 	_check("preset no android", ServiceT.parse_preset_text("[preset.0]\nname=\"Web\"\nplatform=\"Web\"\n", "Android").is_empty())
+
+	# version_code bump in a preset's options — the preset is the single source of truth
+	var vc_path := "user://verify_build_kit_vc.cfg"
+	var vcf := FileAccess.open(vc_path, FileAccess.WRITE)
+	vcf.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\nexport_path=\"build/android/g.apk\"\n[preset.0.options]\nversion/code=3\n")
+	vcf.close()
+	_check("bump_preset_version_code returns next", ServiceT._bump_preset_version_code("preset.0", vc_path) == 4)
+	var vc_read := ConfigFile.new()
+	vc_read.load(vc_path)
+	_check("version/code bumped in preset", int(vc_read.get_value("preset.0.options", "version/code", -1)) == 4)
+	# an unset version/code counts from 1, so the first bump yields 2
+	var vc_path2 := "user://verify_build_kit_vc2.cfg"
+	var vcf2 := FileAccess.open(vc_path2, FileAccess.WRITE)
+	vcf2.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\n[preset.0.options]\npackage/name=\"\"\n")
+	vcf2.close()
+	_check("bump defaults unset to 1 then +1", ServiceT._bump_preset_version_code("preset.0", vc_path2) == 2)
+	_check("bump missing file returns -1", ServiceT._bump_preset_version_code("preset.0", "user://nope_vc.cfg") == -1)
 
 	# derived paths
 	var paths := ServiceT.derive_paths("/proj/game/", "../build/ios/Game.ipa", "iOS")
@@ -164,7 +188,6 @@ func _initialize() -> void:
 	# config defaults
 	_check("default config", int(ServiceT.default_config()["ios"]["build_number"]) == 1)
 	_check("default config android preset", ServiceT.default_config()["android"]["preset"] == "Android")
-	_check("default config android version_code", int(ServiceT.default_config()["android"]["version_code"]) == 1)
 	# ...and carries no credential fields — those belong in the gitignored .env
 	var defaults: Dictionary = ServiceT.default_config()
 	_check("default config holds no secrets",
@@ -281,7 +304,29 @@ func _initialize() -> void:
 		print("  skip apply_fix routes android.preset (a real Android preset exists in export_presets.cfg)")
 	_check("apply_fix routes ios.app_record",
 		str(svc4.apply_fix("ios.app_record").get("error", "")) == "Needs an ASC API key (see the row above).")
+	# no jdk_path in opts → the Fix's first guard fires (no keytool is run)
+	_check("apply_fix routes android.release_keystore",
+		str(svc4.apply_fix("android.release_keystore").get("error", "")).contains("Java SDK"))
 	svc4.free()
+
+	# release keystore Fix — only the two guard branches that return before
+	# shelling out to keytool (generating for real is excluded, like the other
+	# fixes that touch the toolchain/network/disk).
+	var rk_fix_svc: Node = ServiceT.new()
+	_check("release keystore fix needs a jdk",
+		str(rk_fix_svc._fix_release_keystore("").get("error", "")).contains("Java SDK"))
+	var existing_ks := OS.get_cache_dir().path_join("build_kit_verify").path_join("existing.keystore")
+	DirAccess.make_dir_recursive_absolute(existing_ks.get_base_dir())
+	var ef := FileAccess.open(existing_ks, FileAccess.WRITE)
+	if ef != null:
+		ef.store_string("not empty")
+		ef.close()
+	var overwrite_res: Dictionary = rk_fix_svc._fix_release_keystore("/any/jdk", existing_ks)
+	_check("release keystore fix refuses to overwrite",
+		not overwrite_res.get("ok", true) and str(overwrite_res.get("error", "")).contains("already exists"), str(overwrite_res))
+	_check("release keystore fix left the existing file intact",
+		FileAccess.open(existing_ks, FileAccess.READ).get_as_text() == "not empty")
+	rk_fix_svc.free()
 
 	# Read-only (unlike Fix), so safe to exercise against the real repo's export_presets.cfg.
 	var svc5: Node = ServiceT.new()
@@ -420,7 +465,51 @@ func _initialize() -> void:
 		partial.get("status", "") == "fail" and partial.get("id", "") == "android.debug_keystore", str(partial))
 	var none_configured: Dictionary = svc3._check_android_debug_keystore("", "", "")
 	_check("debug keystore allows none configured", none_configured.get("status", "") != "fail", str(none_configured))
+	# release keystore: same all-or-nothing grouping, but "none set" is a warn
+	# (only a release APK needs it). File-existence branch untested, as above.
+	var rk_none: Dictionary = svc3._check_android_release_keystore("", "", "")
+	_check("release keystore none configured warns",
+		rk_none.get("status", "") == "warn" and rk_none.get("id", "") == "android.release_keystore", str(rk_none))
+	var rk_partial: Dictionary = svc3._check_android_release_keystore("/some/ks.keystore", "upload", "")
+	_check("release keystore flags partial config",
+		rk_partial.get("status", "") == "fail" and str(rk_partial.get("detail", "")) == "incomplete config", str(rk_partial))
 	svc3.free()
+
+	# release keystore generation — the pure parts of the generate Fix (3b)
+	var pw := ServiceT.random_password(24)
+	_check("random_password length", pw.length() == 24, pw)
+	var pw_alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	var pw_all_in := true
+	for ch in pw:
+		if not pw_alphabet.contains(ch):
+			pw_all_in = false
+	_check("random_password alphabet", pw_all_in, pw)
+	_check("random_password is random", ServiceT.random_password(24) != ServiceT.random_password(24))
+	var kt_exe := "keytool.exe" if OS.get_name() == "Windows" else "keytool"
+	_check("resolve_keytool_path falls back to bare name", ServiceT.resolve_keytool_path("") == kt_exe)
+	var fake_jdk := OS.get_cache_dir().path_join("build_kit_verify").path_join("fakejdk")
+	DirAccess.make_dir_recursive_absolute(fake_jdk.path_join("bin"))
+	var kt_file := fake_jdk.path_join("bin").path_join(kt_exe)
+	var ktf := FileAccess.open(kt_file, FileAccess.WRITE)
+	if ktf != null:
+		ktf.close()
+	_check("resolve_keytool_path prefers the JDK's bin",
+		ServiceT.resolve_keytool_path(fake_jdk) == kt_file, ServiceT.resolve_keytool_path(fake_jdk))
+	_check("release_keystore_path under keystores dir + suffix",
+		ServiceT.release_keystore_path().begins_with(ServiceT.release_keystore_dir())
+		and ServiceT.release_keystore_path().ends_with("_release.keystore"), ServiceT.release_keystore_path())
+	_check("upload_cert_path suffix",
+		ServiceT.upload_cert_path().ends_with("_upload_cert.pem"), ServiceT.upload_cert_path())
+	var gen := ServiceT.keytool_genkeypair_args("keytool", "/ks.keystore", "upload", "SECRET", "CN=Game")
+	_check("genkeypair keyalg RSA", gen.has("-genkeypair") and gen[gen.find("-keyalg") + 1] == "RSA", str(gen))
+	_check("genkeypair validity 10000", gen[gen.find("-validity") + 1] == "10000", str(gen))
+	_check("genkeypair store+key password",
+		gen[gen.find("-storepass") + 1] == "SECRET" and gen[gen.find("-keypass") + 1] == "SECRET", str(gen))
+	_check("genkeypair dname + alias",
+		gen[gen.find("-dname") + 1] == "CN=Game" and gen[gen.find("-alias") + 1] == "upload", str(gen))
+	var cert := ServiceT.keytool_exportcert_args("keytool", "/ks.keystore", "upload", "SECRET", "/out.pem")
+	_check("exportcert rfc to pem",
+		cert.has("-exportcert") and cert.has("-rfc") and cert[cert.find("-file") + 1] == "/out.pem", str(cert))
 
 	# android sdk/jdk: only the deterministic branch (a path that exists) is
 	# pinned exactly; fixable branches assert fix_value self-consistently
@@ -1293,7 +1382,7 @@ func _verify_release_cli() -> void:
 		_check("Exec.run passes $(…) through literally", int(run["code"]) == 0 and str(run["output"]) == nasty, str(run))
 
 	# config write
-	var two_space := "{\n  \"ios\": {\n    \"preset\": \"iOS\",\n    \"build_number\": 7\n  },\n  \"android\": {\"version_code\": 3}\n}\n"
+	var two_space := "{\n  \"ios\": {\n    \"preset\": \"iOS\",\n    \"build_number\": 7\n  },\n  \"android\": {\"preset\": \"Android\"}\n}\n"
 	var w := Release.set_build_number_text(two_space, 8)
 	_check("config: in-place edit keeps formatting", w == two_space.replace("\"build_number\": 7", "\"build_number\": 8"), w)
 	w = Release.set_build_number_text("{\"ios\": {\"build_number\": 4.0}}", 5)
