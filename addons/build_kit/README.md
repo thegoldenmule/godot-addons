@@ -153,7 +153,9 @@ blank by default), the debug keystore Godot generates and signs debug builds
 with (detect-only — no Fix; the actionable row is the JDK one, since that's
 what Godot's own keystore generation needs), export templates (shared with
 iOS and itch.io — one download, a row on each tab), the ETC2/ASTC project setting Android export
-requires, and any `adb`-connected device.
+requires, the release keystore for release-APK builds (read from your `.env`;
+**Fix** generates one with a random upload-key password), and any
+`adb`-connected device.
 
 **Build → Device** — two stages, both detached and cancellable:
 
@@ -167,16 +169,26 @@ requires, and any `adb`-connected device.
    connected — a picker appears on the Device preflight row; with exactly one
    device it's used silently, with zero the row stays red).
 
+**Build release APK** — one stage: `godot --headless --export-release
+<preset> <out.apk>`, signed with your release keystore. Its path/user/password
+come from `.env` (`GODOT_ANDROID_KEYSTORE_RELEASE_*`), injected into the
+export's environment so the password never reaches a shell line or the log.
+The APK stays on disk — there's no install step. On success the preset's
+`version/code` auto-bumps. The **Release keystore** preflight row's **Fix**
+mints a keystore (random password → `.env`) plus an upload certificate for
+one-time Play App Signing registration.
+
 Known Android failures (an install signed with a different key, an
-unauthorized or missing device, low storage, a missing SDK/JDK path, …) get
-the same plain-language `classify.gd` treatment as iOS's, scoped so an
-Android failure never gets iOS's guidance text or vice versa.
+unauthorized or missing device, low storage, a missing SDK/JDK path, a
+misconfigured release keystore, …) get the same plain-language `classify.gd`
+treatment as iOS's, scoped so an Android failure never gets iOS's guidance
+text or vice versa.
 
 **Not yet built** — visible-but-disabled buttons on the Android tab signal
-the intent without hiding it: Build → Play Console (AAB upload) and Build
-.apk-only (local export) both need "Use Gradle Build" turned on, which this
-pass deliberately doesn't do; release-keystore ingestion is independent of
-that but has no ingestion UI yet either.
+the intent without hiding it: **Build → Play Console** (AAB upload) needs
+"Use Gradle Build" turned on, which this pass deliberately doesn't do; **Add
+release keystore…** (ingesting an *existing* keystore) has no UI yet — for
+now the Release keystore row's **Fix** generates a fresh one.
 
 ### itch.io
 
@@ -301,8 +313,8 @@ Build Kit splits its state by whether it is safe to commit:
 
 | | File | Committed? | Holds |
 |---|---|---|---|
-| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `android.preset`, `android.version_code`, `itch.user`, `itch.game`, `itch.output_dir`, `itch.channels` |
-| Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` (iOS); `BUTLER_API_KEY` (itch.io) |
+| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `android.preset`, `itch.user`, `itch.game`, `itch.output_dir`, `itch.channels` |
+| Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` (iOS); `GODOT_ANDROID_KEYSTORE_RELEASE_*` (Android); `BUTLER_API_KEY` (itch.io) |
 
 ```json
 {
@@ -311,8 +323,7 @@ Build Kit splits its state by whether it is safe to commit:
 		"build_number": 1
 	},
 	"android": {
-		"preset": "Android",
-		"version_code": 1
+		"preset": "Android"
 	},
 	"itch": {
 		"user": "<your-itch-user>",
@@ -332,10 +343,14 @@ macOS / Linux preset is then pushed to its default channel (`html5` /
 (`"enabled": false`), or skip a preset. `itch.output_dir` must be a relative
 path inside the project.
 
-`android.version_code` isn't read or written by anything yet — it's a home
-for the Play Console upload path to auto-bump, the same way `build_number`
-bumps on every TestFlight upload, once that pipeline exists. (The dock's
-upload saves the bump; `cli/release_ios.sh` also commits and pushes it.)
+The Android release version code lives in the export preset itself
+(`version/code` in `export_presets.cfg`), which Build Kit auto-bumps after
+each release-APK export — the same way `build_number` bumps on every
+TestFlight upload. The preset is the single source of truth; commit
+`export_presets.cfg` to share the counter across the team (Build Kit keeps all
+signing secrets out of it, in `.env`). iOS can't do this — its `build_number`
+must live in `build_kit.config.json` because its stamp target, `Info.plist`,
+is in the uncommitted build output.
 
 ```sh
 # .env — written for you when you drop the .p8 / save the Issuer ID

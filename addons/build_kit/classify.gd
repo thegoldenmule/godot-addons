@@ -132,6 +132,16 @@ static func rules() -> Array:
 			"platforms": ["android"],
 		},
 		{
+			"id": "release_keystore_misconfigured",
+			"patterns": [
+				"Release keystore incorrectly configured in the export preset.",
+				"Release Username and/or Password is invalid for the given Release Keystore",
+			],
+			"title": "Couldn't sign with the release keystore",
+			"guidance": "The release keystore is missing, or the stored password/alias doesn't match it.\n1. See the Release keystore preflight row — press Fix to generate one (or add an existing keystore)\n2. If the password is wrong, regenerate it (delete the keystore + its .env lines, then Fix) or fix GODOT_ANDROID_KEYSTORE_RELEASE_* in .env\n3. Build again.",
+			"platforms": ["android"],
+		},
+		{
 			"id": "apksigner_missing",
 			"patterns": ["'apksigner' could not be found", "'apksigner' returned with error", "'apksigner' verification of APK failed", "All 'apksigner' tools located in Android SDK 'build-tools' directory failed"],
 			"title": "APK is unsigned — apksigner missing from the SDK",
