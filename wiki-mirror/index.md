@@ -1,4 +1,4 @@
-# Core Tech
+# Godot Addons
 
 **Status:** active
 

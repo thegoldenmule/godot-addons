@@ -8,9 +8,8 @@
     "scope": null
   },
   "ws:mv72wvay-00gz-t90t1h": {
-    "version": 103,
+    "version": 167,
     "files": {
-      "index.md": "7701ed1f8f68122b6d1ed257a5a24b400f0e802b45ceb166be3a5e9c373f8d28",
       "editor-tool-kit/index.md": "6f3160bb7496bbf110a51a4ccd7cf9c5025fd3cd550f875952cbdadc3b566cef",
       "editor-tool-kit/architecture/index.md": "3e9160b22df71ae9addad5683b05ce784ac7aa7dee3c91447f689329e850af8d",
       "editor-tool-kit/architecture/editor-tool-kit/index.md": "373fc4ddafd2a42a3e8690e97dd7d54b0c86697f0e1619fb15260a8dbe1d675f",
@@ -105,10 +104,10 @@
       "achievements-kit/adrs/per-player-truth-is-one-earned-bool-and-one-progress-int-per-achievement-in-the-game-s-synced-save.md": "0639cd847b46ec6003c496828b6b3e5e686594a90b791a0d3f781da1e854969c",
       "achievements-kit/adrs/snapser-gets-one-aggregate-statistic-not-one-per-achievement.md": "6a4d7fdae52bf815c12cd8fea301f75d715cb10b9a42d51874daa04df9e9ffa2",
       "achievements-kit/adrs/the-runtime-depends-on-nothing-the-snapser-bridge-is-duck-typed.md": "6031f458e5161a6fdea3f6856d498abcc1465c90bb54aea48db67c5435d04a7e",
-      "achievements-kit/adrs/in-game-ui-stays-per-game-the-kit-ships-view-models-signals-and-debug-actions.md": "be735d3136f39ba81670447b1e5899add881f70ac773e460283c01a82cb4f275"
+      "achievements-kit/adrs/in-game-ui-stays-per-game-the-kit-ships-view-models-signals-and-debug-actions.md": "be735d3136f39ba81670447b1e5899add881f70ac773e460283c01a82cb4f275",
+      "index.md": "024cfc795182a101fbf29253ca60294b693033bd255341a74ab993b36826be2a"
     },
     "pages": {
-      "toc:mv72wync-00h1-19nh5n": "index.md",
       "toc:mql36lau-01pg-x14tg2": "editor-tool-kit/index.md",
       "toc:mql377hi-01pk-eyu3su": "editor-tool-kit/architecture/index.md",
       "architecture:mql3ccsv-01q2-v81c5e": "editor-tool-kit/architecture/editor-tool-kit/index.md",
@@ -203,10 +202,11 @@
       "decision-record:mv5fosqi-00eo-chsfmg": "achievements-kit/adrs/per-player-truth-is-one-earned-bool-and-one-progress-int-per-achievement-in-the-game-s-synced-save.md",
       "decision-record:mv5foss9-00eq-lymatc": "achievements-kit/adrs/snapser-gets-one-aggregate-statistic-not-one-per-achievement.md",
       "decision-record:mv5fosx0-00es-51ld1r": "achievements-kit/adrs/the-runtime-depends-on-nothing-the-snapser-bridge-is-duck-typed.md",
-      "decision-record:mv5fosys-00eu-ccen1j": "achievements-kit/adrs/in-game-ui-stays-per-game-the-kit-ships-view-models-signals-and-debug-actions.md"
+      "decision-record:mv5fosys-00eu-ccen1j": "achievements-kit/adrs/in-game-ui-stays-per-game-the-kit-ships-view-models-signals-and-debug-actions.md",
+      "toc:mvh66xpq-004n-8cyrh2": "index.md"
     },
     "assets": {},
     "layout": 2,
-    "scope": "toc:mv72wync-00h1-19nh5n"
+    "scope": "toc:mvh66xpq-004n-8cyrh2"
   }
 }

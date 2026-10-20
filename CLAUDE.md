@@ -145,10 +145,13 @@ and push to `main` yourself — don't leave it uncommitted or ask first.
 ## Docs (`wiki-mirror/`) are emitted, never hand-edited
 
 The addon docs live in the shared **Sovereign Axe** workspace (`ws:mv72wvay-00gz-t90t1h`)
-under **Core Tech** (`toc:mv72wync-00h1-19nh5n`); author them with the `wiki` MCP at
-`hotseat.thegoldenmule.com/mcp`. Create pages only under Core Tech or its children (`parentId`),
-never at the workspace root or under a game page. Each addon is its own TOC under Core Tech.
-`hotseat.config.json` pins this (`workspaceId` + `rootPageId`), and the hotseat skills read it.
-Game pages and **Studio** (`toc:mv770s8o-004h-12oesi`, studio-wide conventions) are readable
-and linkable. `wiki-mirror/**` is a read-only projection of Core Tech that the local mirror
-service keeps current; never edit the markdown directly (it gets overwritten).
+under **Core Tech › Godot Addons** (`toc:mvh66xpq-004n-8cyrh2`); author them with the `wiki` MCP
+at `hotseat.thegoldenmule.com/mcp`. Create pages only under Godot Addons or its children
+(`parentId`), never at the workspace root, directly under Core Tech, or under a game page. Each
+addon is its own TOC under Godot Addons. `hotseat.config.json` pins this (`workspaceId` +
+`rootPageId`), and the hotseat skills read it. This repo is public, so only the Godot Addons
+subtree is projected here; the rest of the workspace is private. Other Core Tech pages, game pages
+and **Studio** (`toc:mv770s8o-004h-12oesi`, studio-wide conventions) are readable, but a link to
+them from an addon page publishes their title. `wiki-mirror/**` is a read-only projection of
+Godot Addons that the local mirror service keeps current; never edit the markdown directly (it
+gets overwritten).
