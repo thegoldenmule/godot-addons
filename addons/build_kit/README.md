@@ -9,8 +9,9 @@ One-button builds from inside the Godot editor: **iOS → TestFlight**,
 
 **Preflight** — a live checklist that diagnoses the whole chain and tells you
 exactly how to fix each broken link: Xcode, iOS export templates, the iOS
-export preset, signed-in Xcode teams, an App Store Connect API key, whether
-the **App Store Connect app record exists** for your bundle id, and paired
+export preset, signed-in Xcode teams, an App Store Connect API key, which
+of the two the build will sign with (`ios.auth`, see below), whether the
+**App Store Connect app record exists** for your bundle id, and paired
 devices. Rows the service can repair itself get a **Fix** button (e.g. it
 writes `export_project_only=true` and fills the Team ID into the preset).
 
@@ -45,6 +46,26 @@ with its log streamed into the dock (cancellable, never blocks the editor):
    uploaded straight to App Store Connect
 
 "Build .ipa only" runs stages 1–6 and stops.
+
+### Signing auth (`ios.auth`, 0.3.2+)
+
+Stages 5 and 7 sign and upload with either the signed-in Xcode session or the
+App Store Connect API key (`-authenticationKeyPath/-ID/-IssuerID`).
+`ios.auth` in `build_kit.config.json` picks:
+
+| `ios.auth` | Signs and uploads with |
+|---|---|
+| `"auto"` (default) | the Xcode session when Xcode has a signed-in team, else the API key. A session carries the human's full permissions, and a Developer-role key can't cloud-sign, so a session wins when there is one |
+| `"api_key"` | always the API key; Xcode's account state is never read. The build refuses to start (preflight row `ios.auth` fails) when the key isn't configured or its `.p8` is missing. The key needs role App Manager (or Admin) |
+| `"xcode"` | always the Xcode session; the key is never passed. Refuses to start when Xcode has no signed-in team |
+
+Pick `"api_key"` when the Xcode session can't be relied on, e.g. releases cut
+from a terminal or an agent shell, where `xcodebuild` can fail at export with
+`Failed to Use Accounts` ("Failed to find an account with App Store Connect
+access for team …") even right after you sign into Xcode. The build log's
+first line, and the CLI's output, name the choice:
+`auth: ASC API key <id> [ios.auth api_key]` or
+`auth: Xcode session (teams: …) [ios.auth auto]`.
 
 > **0.2.1:** before this, the archive was exported without its entitlements
 > ever being declared, so a capability added to the App ID after its
@@ -82,7 +103,9 @@ The script runs `cli/release_ios.gd` headless, which drives this addon's own
 `BuildKitService` (the same stages as the dock), in order:
 
 1. **Preflight** — iOS preset present; an App Store Connect API key (needed to
-   pick the build number and watch processing); and, unless `--no-commit`, a
+   pick the build number and watch processing); `ios.auth` resolvable (an
+   `"api_key"` mode with no usable key fails here, even with `--no-upload`);
+   and, unless `--no-commit`, a
    git work tree with **nothing staged**, `build_kit.config.json` not locally
    modified, and (unless `--no-push`) a branch with an upstream it isn't
    ahead of — so the push carries only the release commit. Checked *before*
@@ -119,6 +142,10 @@ The script runs `cli/release_ios.gd` headless, which drives this addon's own
 Output is one line per stage plus a final summary, e.g.
 
 ```
+[preflight] ok — preset iOS, version 1.0, auth api_key, upload yes, commit yes, push yes
+[build_number] ok — 42 (config 42, highest on App Store Connect for 1.0: 41)
+auth: ASC API key <redacted> [ios.auth api_key]
+…
 [verify_entitlements] ok — 4s
 [upload] ok — 95s
 [config] ok — build_kit.config.json build_number → 43
@@ -313,14 +340,15 @@ Build Kit splits its state by whether it is safe to commit:
 
 | | File | Committed? | Holds |
 |---|---|---|---|
-| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `android.preset`, `itch.user`, `itch.game`, `itch.output_dir`, `itch.channels` |
+| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `ios.auth`, `android.preset`, `itch.user`, `itch.game`, `itch.output_dir`, `itch.channels` |
 | Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` (iOS); `GODOT_ANDROID_KEYSTORE_RELEASE_*` (Android); `BUTLER_API_KEY` (itch.io) |
 
 ```json
 {
 	"ios": {
 		"preset": "iOS",
-		"build_number": 1
+		"build_number": 1,
+		"auth": "auto"
 	},
 	"android": {
 		"preset": "Android"
@@ -375,7 +403,9 @@ take precedence over the `.env`.
 
 Without a key the pipeline uses your signed-in Xcode session — fine
 interactively, but sessions expire and the app-record check then only happens
-reactively at upload time.
+reactively at upload time. `ios.auth` (`"auto"`, `"api_key"` or `"xcode"`,
+see **Signing auth** above) decides which one signs when both are available;
+it is a choice, not a secret, so it lives in the committed config.
 
 One-time steps no tool can automate (the preflight walks you through them):
 Apple Developer Program membership, creating the API key, and creating the

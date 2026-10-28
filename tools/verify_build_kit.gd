@@ -542,11 +542,97 @@ func _initialize() -> void:
 
 	_verify_itch()
 	_verify_itch_classify()
+	_verify_ios_auth()
 	_verify_ios_signing()
 	_verify_release_cli()
 
 	print("VERIFY build_kit: %s" % ("PASS" if _fails == 0 else "FAIL (%d)" % _fails))
 	quit(0 if _fails == 0 else 1)
+
+
+# --- iOS auth mode (ios.auth) ------------------------------------------------
+
+func _verify_ios_auth() -> void:
+	var teams := PackedStringArray(["TEAM123456"])
+	var none := PackedStringArray()
+
+	# config: ios.auth defaults to "auto" (pre-0.3.2 behaviour) and normalises
+	_check("auth: default config is auto", ServiceT.default_config()["ios"]["auth"] == "auto")
+	_check("auth: missing → auto", ServiceT.ios_auth_mode({"ios": {"preset": "iOS"}}) == "auto")
+	_check("auth: no ios section → auto", ServiceT.ios_auth_mode({}) == "auto")
+	_check("auth: blank → auto", ServiceT.ios_auth_mode({"ios": {"auth": "  "}}) == "auto")
+	_check("auth: case/space-insensitive", ServiceT.ios_auth_mode({"ios": {"auth": " API_KEY "}}) == "api_key")
+	_check("auth: unknown kept for the error", ServiceT.ios_auth_mode({"ios": {"auth": "keychain"}}) == "keychain")
+
+	# auto mode — the Xcode session wins when signed in, the key only without one
+	var a := ServiceT.resolve_ios_auth("auto", teams, true, "")
+	_check("auth mode auto, session beats key", a["ok"] and not a["use_key"], str(a))
+	a = ServiceT.resolve_ios_auth("auto", none, true, "")
+	_check("auth mode auto, key when no session", a["ok"] and a["use_key"], str(a))
+	a = ServiceT.resolve_ios_auth("auto", none, false, "no key")
+	_check("auth mode auto, neither → session (fails later, as before)", a["ok"] and not a["use_key"], str(a))
+
+	# api_key mode — always the key, whatever Xcode's account state; refuses without one
+	a = ServiceT.resolve_ios_auth("api_key", teams, true, "")
+	_check("auth mode api_key, key even with a signed-in session", a["ok"] and a["use_key"], str(a))
+	a = ServiceT.resolve_ios_auth("api_key", none, false, "no App Store Connect API key configured (missing ASC_KEY_ID)")
+	_check("auth mode api_key, refuses without a key", not a["ok"] and str(a["error"]).contains("\"api_key\"")
+		and str(a["error"]).contains("ASC_KEY_ID") and str(a["error"]).contains("\"auto\""), str(a))
+	a = ServiceT.resolve_ios_auth("api_key", teams, true, "the App Store Connect API key file is missing (/k/key.p8)")
+	_check("auth mode api_key, refuses a missing key file", not a["ok"] and str(a["error"]).contains("file is missing"), str(a))
+
+	# xcode mode — always the session, never the key; refuses with no signed-in team
+	a = ServiceT.resolve_ios_auth("xcode", teams, true, "")
+	_check("auth mode xcode, session even with a key", a["ok"] and not a["use_key"], str(a))
+	a = ServiceT.resolve_ios_auth("xcode", none, true, "")
+	_check("auth mode xcode, refuses with no signed-in team", not a["ok"] and str(a["error"]).contains("no signed-in team"), str(a))
+
+	a = ServiceT.resolve_ios_auth("keychain", teams, true, "")
+	_check("auth: unknown mode refused, valid ones named", not a["ok"]
+		and str(a["error"]).contains("keychain") and str(a["error"]).contains("auto, api_key, xcode"), str(a))
+
+	# the build log's auth: line names the credentials and the mode
+	var key_line := ServiceT.ios_auth_line({"use_key": true, "mode": "api_key", "teams": none}, "K1")
+	_check("auth line: key", key_line == "auth: ASC API key K1 [ios.auth api_key]", key_line)
+	var session_line := ServiceT.ios_auth_line({"use_key": false, "mode": "auto", "teams": teams}, "K1")
+	_check("auth line: session", session_line == "auth: Xcode session (teams: TEAM123456) [ios.auth auto]", session_line)
+
+	# the ios.auth preflight row
+	var row := ServiceT.check_ios_auth(ServiceT.resolve_ios_auth("api_key", none, false, "no key"), "")
+	_check("auth row: refused mode fails with the reason", row["id"] == "ios.auth" and row["status"] == "fail"
+		and str(row["guidance"]).contains("api_key"), str(row))
+	var ok_choice := ServiceT.resolve_ios_auth("api_key", teams, true, "")
+	ok_choice["teams"] = none
+	row = ServiceT.check_ios_auth(ok_choice, "K1")
+	_check("auth row: api_key ok", row["status"] == "ok" and str(row["detail"]) == "ASC API key K1 [ios.auth api_key]", str(row))
+	var bare := ServiceT.resolve_ios_auth("auto", none, false, "no key")
+	bare["teams"] = none
+	row = ServiceT.check_ios_auth(bare, "")
+	_check("auth row: auto with nothing warns and names api_key", row["status"] == "warn"
+		and str(row["guidance"]).contains("api_key"), str(row))
+
+	# service: legacy config fields take precedence over env/.env, so these are hermetic
+	var svc: Node = ServiceT.new()
+	var existing := ProjectSettings.globalize_path("res://project.godot")
+	svc.config = {"ios": {"auth": "api_key", "asc_key_id": "K1", "asc_issuer_id": "I1",
+		"asc_key_path": "/nonexistent/key.p8"}}
+	_check("auth: key problem names a missing file", str(svc.asc_key_problem()).contains("file is missing"))
+	var choice: Dictionary = svc.choose_ios_auth()
+	_check("auth: api_key with a missing file refused", not choice["ok"], str(choice))
+	svc.config["ios"]["asc_key_path"] = existing
+	_check("auth: key problem empty when configured", svc.asc_key_problem() == "")
+	choice = svc.choose_ios_auth()
+	_check("auth: api_key never reads Xcode's teams", choice["ok"] and choice["use_key"]
+		and (choice["teams"] as PackedStringArray).is_empty(), str(choice))
+	var account: Dictionary = svc._check_account()
+	_check("auth: Xcode account row is not used under api_key", account["status"] == "ok"
+		and str(account["detail"]).contains("not used"), str(account))
+	svc.free()
+
+	# classify: the Xcode-session failure that motivated api_key
+	var unusable := Classify.classify("error: exportArchive Failed to Use Accounts\nerror: exportArchive Failed to find an account with App Store Connect access for team T1\n** EXPORT FAILED **", {"team_id": "T1"}, "ios")
+	_check("classify Xcode session unusable", unusable["id"] == "xcode_session_unusable"
+		and str(unusable["guidance"]).contains("api_key") and str(unusable["guidance"]).contains("T1"), str(unusable))
 
 
 # --- itch.gd -----------------------------------------------------------------

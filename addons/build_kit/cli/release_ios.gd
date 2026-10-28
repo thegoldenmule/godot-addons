@@ -68,6 +68,7 @@ func _release() -> int:
 	_secrets = [creds["key_id"], creds["issuer_id"], creds["key_path"]]
 	_svc.stage_changed.connect(_on_stage_changed)
 	_svc.build_finished.connect(_on_build_finished)
+	_svc.log_line.connect(_on_log_line)
 
 	var version := ""
 	var build := 0
@@ -84,14 +85,19 @@ func _release() -> int:
 	if opts["upload"] and not _svc.has_asc_key():
 		_line("preflight", "FAIL", "no App Store Connect API key (ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH) — set it up on the Build Kit dock's ASC row, or use --no-upload")
 		return _finish(false, version, "?", asc_state, entitlements, commit)
+	var auth_choice: Dictionary = _svc.choose_ios_auth()
+	if not auth_choice["ok"]:
+		_line("preflight", "FAIL", str(auth_choice["error"]))
+		return _finish(false, version, "?", asc_state, entitlements, commit)
 	var upstream := {}
 	if opts["commit"]:
 		upstream = Core.git_preflight(_git, opts["push"])
 		if not upstream["ok"]:
 			_line("preflight", "FAIL", str(upstream["error"]))
 			return _finish(false, version, "?", asc_state, entitlements, commit)
-	_line("preflight", "ok", "preset %s, version %s, upload %s, commit %s, push %s" % [
-		preset["name"], version if version != "" else "(unset)", _yn(opts["upload"]), _yn(opts["commit"]), _yn(opts["push"])])
+	_line("preflight", "ok", "preset %s, version %s, auth %s, upload %s, commit %s, push %s" % [
+		preset["name"], version if version != "" else "(unset)", auth_choice["mode"],
+		_yn(opts["upload"]), _yn(opts["commit"]), _yn(opts["push"])])
 
 	# ── build number ──
 	var config_number := int(_svc.config["ios"].get("build_number", 1))
@@ -203,6 +209,13 @@ func _on_stage_changed(stage: String, platform: String) -> void:
 		_stage_done(_stage)
 	_stage = stage
 	_stage_started_ms = Time.get_ticks_msec()
+
+
+## The service's build log goes to a file; only its `auth:` line (which
+## credentials sign and upload) is worth echoing here.
+func _on_log_line(text: String, platform: String) -> void:
+	if platform == "ios" and text.begins_with("auth: "):
+		print(Core.redact(text.strip_edges(), _secrets))
 
 
 func _stage_done(stage: String) -> void:

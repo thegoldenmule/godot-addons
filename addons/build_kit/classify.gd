@@ -53,6 +53,14 @@ static func rules() -> Array:
 			"platforms": ["ios"],
 		},
 		{
+			"id": "xcode_session_unusable",
+			"patterns": ["Failed to Use Accounts", "Failed to find an account with App Store Connect access"],
+			"title": "The Xcode account session couldn't be used",
+			"guidance": "xcodebuild found Xcode's signed-in account for team {team_id} but couldn't use it (common from a terminal or agent shell, even right after signing in).\n1. Sign and upload with the App Store Connect API key instead: set \"auth\": \"api_key\" under \"ios\" in build_kit.config.json (needs ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in the .env, role App Manager)\n2. Or re-sign into Xcode (Settings → Accounts) and build from the editor.",
+			"links": [{"label": "Create API key", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
+			"platforms": ["ios"],
+		},
+		{
 			"id": "not_signed_in",
 			"patterns": ["No Accounts", "Your session has expired", "No Apple ID", "requires a development team", "Signing for \"", "No signing certificate"],
 			"title": "No usable Apple account / team for signing",
@@ -64,7 +72,7 @@ static func rules() -> Array:
 			"id": "cloud_signing_permission",
 			"patterns": ["Cloud signing permission error"],
 			"title": "The API key can't manage signing (role too low)",
-			"guidance": "1. ↗ Open Integrations → find key {key_id} — its role must be App Manager (Developer keys can't cloud-sign)\n2. Roles can't be edited: revoke it, create a new key with role App Manager, drop the new .p8 on this panel\n3. Or simply stay signed into Xcode — a login session is used automatically when available.",
+			"guidance": "1. ↗ Open Integrations → find key {key_id} — its role must be App Manager (Developer keys can't cloud-sign)\n2. Roles can't be edited: revoke it, create a new key with role App Manager, drop the new .p8 on this panel\n3. Or, with ios.auth \"auto\" (the default), stay signed into Xcode — its session is then used instead of the key.",
 			"links": [{"label": "Open Integrations", "url": "https://appstoreconnect.apple.com/access/integrations/api"}],
 			"platforms": ["ios"],
 		},

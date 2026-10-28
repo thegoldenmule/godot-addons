@@ -26,6 +26,8 @@ const USAGE := """Usage: addons/build_kit/cli/release_ios.sh [--project <dir>] [
 One command for an iOS TestFlight release: pick the build number (config vs App
 Store Connect), export, archive, sign, verify entitlements, upload, wait for
 processing, then commit + push the next build_number in build_kit.config.json.
+Signing and upload auth follow ios.auth in that file: auto (default), api_key or
+xcode.
 
   --project <dir>    directory holding project.godot (default: the project this addon lives in)
   --no-upload        stop after the verified local .ipa (no ASC, no commit, no push)

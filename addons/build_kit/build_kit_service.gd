@@ -89,6 +89,8 @@ static func default_config() -> Dictionary:
 		"ios": {
 			"preset": "iOS",
 			"build_number": 1,
+			# Signing/upload auth: "auto" | "api_key" | "xcode" (see IOS_AUTH_MODES).
+			"auth": "auto",
 		},
 		"android": {
 			"preset": "Android",
@@ -201,6 +203,92 @@ func butler_key() -> Dictionary:
 func has_asc_key() -> bool:
 	var c := asc_credentials()
 	return c["key_id"] != "" and c["issuer_id"] != "" and c["key_path"] != ""
+
+
+# ── iOS auth mode (ios.auth) ──────────────────────────────────────────────────
+#
+# Which credentials sign and upload the iOS build:
+#   "auto"    — the Xcode session when Xcode has a signed-in team, else the ASC
+#               API key (the default, and the only behaviour before 0.3.2).
+#   "api_key" — always the ASC API key; Xcode's account state is never read.
+#               For machines where the Xcode session can't be trusted (e.g. a
+#               non-interactive shell where it fails with "Failed to Use
+#               Accounts"). Needs an App Manager (or Admin) key.
+#   "xcode"   — always the signed-in Xcode session; the key is never passed.
+
+const IOS_AUTH_MODES := ["auto", "api_key", "xcode"]
+
+
+## The configured ios.auth, lower-cased and trimmed ("" or missing → "auto").
+## An unknown value comes back as-is so resolve_ios_auth can reject it by name.
+static func ios_auth_mode(cfg: Dictionary) -> String:
+	var ios: Variant = cfg.get("ios", {})
+	var mode := str((ios as Dictionary).get("auth", "auto")) if ios is Dictionary else "auto"
+	mode = mode.strip_edges().to_lower()
+	return "auto" if mode == "" else mode
+
+
+## Why the ASC API key can't sign right now ("" = usable): unset fields, or a
+## key file that isn't on disk.
+func asc_key_problem() -> String:
+	var c := asc_credentials()
+	var missing := PackedStringArray()
+	for pair in [["key_id", "ASC_KEY_ID"], ["issuer_id", "ASC_ISSUER_ID"], ["key_path", "ASC_KEY_PATH"]]:
+		if str(c[pair[0]]) == "":
+			missing.append(pair[1])
+	if not missing.is_empty():
+		return "no App Store Connect API key configured (missing %s in the environment or .env)" % ", ".join(missing)
+	if not FileAccess.file_exists(str(c["key_path"])):
+		return "the App Store Connect API key file is missing (%s)" % c["key_path"]
+	return ""
+
+
+## Pure auth decision: {ok, use_key, mode, error}. `has_key` is has_asc_key()
+## (auto mode's test, unchanged from before ios.auth existed); `key_problem` is
+## asc_key_problem(), which api_key mode must see empty.
+static func resolve_ios_auth(mode: String, teams: PackedStringArray, has_key: bool, key_problem: String) -> Dictionary:
+	var out := {"ok": true, "use_key": false, "mode": mode, "error": ""}
+	match mode:
+		"auto":
+			# A signed-in Xcode session cloud-signs with the human's full
+			# permissions, so auto prefers it; the key only when there is none.
+			out["use_key"] = teams.is_empty() and has_key
+		"api_key":
+			out["use_key"] = true
+			if key_problem != "":
+				out["ok"] = false
+				out["error"] = "ios.auth is \"api_key\" but %s. Set the key up on the Build Kit dock's App Store Connect API key row (role App Manager), or set ios.auth to \"auto\" in build_kit.config.json." % key_problem
+		"xcode":
+			if teams.is_empty():
+				out["ok"] = false
+				out["error"] = "ios.auth is \"xcode\" but Xcode has no signed-in team. Sign in (Xcode → Settings → Accounts → ＋), or set ios.auth to \"auto\" or \"api_key\" in build_kit.config.json."
+		_:
+			out["ok"] = false
+			out["error"] = "ios.auth is \"%s\"; expected one of: %s (build_kit.config.json)." % [mode, ", ".join(IOS_AUTH_MODES)]
+	return out
+
+
+## Xcode's signed-in team ids (empty when nobody has signed in).
+static func xcode_teams() -> PackedStringArray:
+	return parse_teams(str(Exec.run(PackedStringArray(
+		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
+
+
+## The auth this machine would use for an iOS build under the current config:
+## resolve_ios_auth's dict plus `teams`. api_key mode never asks Xcode.
+func choose_ios_auth() -> Dictionary:
+	var mode := ios_auth_mode(config)
+	var teams := PackedStringArray() if mode == "api_key" else xcode_teams()
+	var choice := resolve_ios_auth(mode, teams, has_asc_key(), asc_key_problem())
+	choice["teams"] = teams
+	return choice
+
+
+## The build log's `auth:` line (without the newline).
+static func ios_auth_line(choice: Dictionary, key_id: String) -> String:
+	var what := "ASC API key %s" % key_id if choice["use_key"] \
+		else "Xcode session (teams: %s)" % ", ".join(choice.get("teams", PackedStringArray()))
+	return "auth: %s [ios.auth %s]" % [what, choice["mode"]]
 
 
 static func parse_env(text: String) -> Dictionary:
@@ -720,6 +808,14 @@ func start_build(upload := true, build_number := 0) -> Dictionary:
 		return err("The iOS preset must have application/export_project_only=true (Build Kit runs xcodebuild itself — Godot's internal Xcode build can't take API-key auth and is broken under Xcode 26). Use the preflight Fix button.")
 	if _preset["team_id"] == "":
 		return err("The iOS preset has no App Store Team ID. Use the preflight Fix button (or set application/app_store_team_id in Project → Export).")
+	# Auth choice (ios.auth, see resolve_ios_auth). In "auto" a logged-in
+	# Xcode session wins: a Developer-role key authenticates but CANNOT manage
+	# signing assets ("Cloud signing permission error"). "api_key" pins the key
+	# for machines whose Xcode session fails ("Failed to Use Accounts").
+	var auth_choice := choose_ios_auth()
+	if not auth_choice["ok"]:
+		return err(str(auth_choice["error"]))
+	var use_key: bool = auth_choice["use_key"]
 
 	var root := ProjectSettings.globalize_path("res://")
 	var paths := derive_paths(root, _preset["export_path"], "iOS")
@@ -730,15 +826,6 @@ func start_build(upload := true, build_number := 0) -> Dictionary:
 		"key_id": str(asc_credentials()["key_id"])}
 	_upload = upload
 	_active_platform = "ios"
-
-	# Auth choice: a logged-in Xcode session cloud-signs with full permission,
-	# so prefer it; API-key flags only when there is no session (headless/CI).
-	# A Developer-role key authenticates but CANNOT manage signing assets
-	# ("Cloud signing permission error"), so forcing the key when a session
-	# exists only downgrades capability.
-	var teams := parse_teams(str(Exec.run(PackedStringArray(
-		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
-	var use_key := teams.is_empty() and has_asc_key()
 
 	# Always export a local .ipa first (verified before anything is uploaded);
 	# the upload stage, if any, gets its own destination=upload options file.
@@ -751,8 +838,7 @@ func start_build(upload := true, build_number := 0) -> Dictionary:
 			return err("Cannot write %s" % options_path)
 
 	var auth := _auth_flags() if use_key else PackedStringArray()
-	log_line.emit("auth: %s\n" % ("ASC API key %s" % _context["key_id"] if use_key
-		else "Xcode session (teams: %s)" % ", ".join(teams)), _active_platform)
+	log_line.emit(ios_auth_line(auth_choice, str(_context["key_id"])) + "\n", _active_platform)
 	_stages = ios_stages(paths, OS.get_executable_path(), root, _preset["name"], build_number, upload, auth)
 	_next_stage(paths)
 	return ok({"stages": _stages.size() + 1, "build_number": build_number})
@@ -1939,6 +2025,7 @@ func refresh_preflight() -> void:
 	rows.append(_check_account())
 	rows.append(_check_dist_cert())
 	rows.append(_check_asc_key())
+	rows.append(check_ios_auth(choose_ios_auth(), str(asc_credentials()["key_id"])))
 	rows.append(_check_app_record())
 	rows.append(_check_devices())
 	rows.append(_check_android_templates())
@@ -2086,14 +2173,30 @@ func list_teams() -> Array:
 
 
 func _check_account() -> Dictionary:
+	var mode := ios_auth_mode(config)
+	if mode == "api_key":
+		return _row("ios.account", "Xcode account", "ok", "not used (ios.auth is api_key)")
 	var r: Dictionary = Exec.run(PackedStringArray(["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))
 	var teams := parse_teams(str(r["output"]))
 	if int(r["code"]) != 0 or teams.is_empty():
-		var status := "warn" if has_asc_key() else "fail"
+		var status := "warn" if has_asc_key() and mode != "xcode" else "fail"
 		return _row("ios.account", "Xcode account", status, "no signed-in teams",
 			"Sign into Xcode (Xcode → Settings → Accounts → ＋). Not needed once an ASC API key is configured — cloud signing then works headless.",
 			false, [{"label": "Apple Developer account", "url": "https://developer.apple.com/account"}])
 	return _row("ios.account", "Xcode account", "ok", "teams: " + ", ".join(teams))
+
+
+## The `ios.auth` row: which credentials the next iOS build signs and uploads
+## with, given choose_ios_auth()'s verdict. Static so it is testable headless.
+static func check_ios_auth(choice: Dictionary, key_id: String) -> Dictionary:
+	var label := "Signing auth (ios.auth)"
+	if not choice["ok"]:
+		return _row("ios.auth", label, "fail", str(choice["mode"]), str(choice["error"]))
+	var detail := ios_auth_line(choice, key_id).trim_prefix("auth: ")
+	if choice["mode"] == "auto" and not choice["use_key"] and (choice.get("teams", PackedStringArray()) as PackedStringArray).is_empty():
+		return _row("ios.auth", label, "warn", "auto: no Xcode session and no API key",
+			"Sign into Xcode, or configure the App Store Connect API key (row above). To always use the key, set \"auth\": \"api_key\" under \"ios\" in build_kit.config.json.")
+	return _row("ios.auth", label, "ok", detail)
 
 
 func _check_dist_cert() -> Dictionary:
