@@ -8,7 +8,7 @@
     "scope": null
   },
   "ws:mv72wvay-00gz-t90t1h": {
-    "version": 167,
+    "version": 175,
     "files": {
       "editor-tool-kit/index.md": "6f3160bb7496bbf110a51a4ccd7cf9c5025fd3cd550f875952cbdadc3b566cef",
       "editor-tool-kit/architecture/index.md": "3e9160b22df71ae9addad5683b05ce784ac7aa7dee3c91447f689329e850af8d",
@@ -75,14 +75,14 @@
       "build-kit/architecture/build-kit/build-kit-dock.md": "5e638ec520abc7b7f534c9349e93407ed44b06df17af840a0c65d0d3fc58d0a7",
       "build-kit/architecture/build-kit/configuration-secrets.md": "3b4451630632c2819622d8107bd20970d6547695247cc07831a86986ffa0861c",
       "build-kit/usage/index.md": "b6488fd57e48b58255143d29b1a6bffed2e9ba3dc35932c31263d694edcb2675",
-      "build-kit/usage/getting-started-install-enable-preflight.md": "c37442f48247fa3da6e356a3998046ac423432770ca1cefe99f1d8b30518b1f8",
+      "build-kit/usage/getting-started-install-enable-preflight.md": "904fdd083837508c728ab4c3fcf00d3b79ab914dad1adcf5d7266be1e81c35f2",
       "build-kit/usage/the-app-store-connect-api-key.md": "fc31fad2f96313d95eaf0481029c915dc96364ae3070dddffb7c5874416f6606",
-      "build-kit/usage/building-to-testflight.md": "59e7336c044ecacca4a8a40c50d0806d4a3464f230f013ad52e62541acfc9419",
+      "build-kit/usage/building-to-testflight.md": "91f46c51ac0a7ae071bed62fdd7c58566f8abfad4c6c0e8106e37da88383bd9d",
       "build-kit/adrs/index.md": "3b54b6d209eb8d3ecb7f9f0edf2ea1e3005d5223e65ae40fbf5bd2cd15a73fac",
       "build-kit/adrs/build-kit-drives-xcodebuild-itself-godot-s-built-in-ipa-export-is-never-used.md": "bde1bf5f271ae1c3769d2fc044f2cdf3425458412071f3eb583800c113af96e9",
       "build-kit/adrs/every-external-command-runs-detached-logged-to-a-file-with-an-exit-code-sentinel.md": "e458d83e8ba81e362e01a45f55b3e9a8f2a2d1aac3a92bec828ccab1a14496ab",
       "build-kit/adrs/the-archive-is-built-unsigned-only-exportarchive-signs.md": "61e951fee95fea86a2644326176693892cec5d66837be43b7aca144fb238cca7",
-      "build-kit/adrs/a-signed-in-xcode-session-outranks-the-api-key-for-signing-auth.md": "8bd32b7b49f24bdfd3be7de6879e77c7cc2f4910f9091c48daa069a0364b1f1e",
+      "build-kit/adrs/a-signed-in-xcode-session-outranks-the-api-key-for-signing-auth.md": "34d3033b28a32146a89721ed0c6ce0b1629f29a79e0b7e6bf17f5e74ef13edf5",
       "build-kit/adrs/asc-credentials-live-in-the-repo-env-never-in-the-committed-config.md": "33e82532da9773337ba2067cca5b5e30a5e3e87c9b2093fc67558883e133b3c4",
       "build-kit/adrs/known-failures-are-classified-into-plain-language-guidance-never-a-raw-log.md": "868e874827b1e3401d358653bb871a07b0154897067d29832eb033d8e41bdacc",
       "build-kit/adrs/the-api-key-is-validated-against-the-preset-s-team-before-any-probe-it-makes-is-trusted.md": "5d288bdf50903048ce5590b5aa3385e6f70a58a3ab8f00b28b0a0afc78971f3e",

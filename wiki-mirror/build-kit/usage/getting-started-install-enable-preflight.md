@@ -21,9 +21,10 @@ Press **⟳ Refresh preflight**. The checklist diagnoses the whole chain, and ev
 | iOS export templates | the pack for _this exact_ Godot version is installed | **yes** — downloads and installs it (~1 GB) |
 | ETC2/ASTC textures | `import_etc2_astc` is on | **yes** — enables it (textures reimport once) |
 | iOS export preset | exists, `export_project_only` on, Team ID set, no missing base keys | **yes** — plus a create-preset form when there is none |
-| Xcode account | a team is signed into Xcode | no — Xcode → Settings → Accounts |
+| Xcode account | a team is signed into Xcode (reads "not used" when `ios.auth` is `"api_key"`) | no — Xcode → Settings → Accounts |
 | Distribution certificate | an Apple Distribution identity is in the keychain | no — Xcode → Settings → Accounts → Manage Certificates… |
 | App Store Connect API key | key id, issuer id and `.p8` all present and valid for your team | no — the inline form adopts a dropped `.p8` |
+| Signing auth (`ios.auth`) | which credentials the next build signs and uploads with, and that the configured mode can be satisfied | no — fix the key or Xcode sign-in it names, or change `ios.auth` |
 | App Store Connect app record | the app exists for your bundle id | **yes** for registering the bundle id; creating the app is manual |
 | Paired device | `devicectl` sees a device | no — only needed for direct installs, not TestFlight |
 
@@ -51,14 +52,15 @@ Preflight walks you through each of these, but they are yours to do:
 
 |  | File | Committed? | Holds |
 | --- | --- | --- | --- |
-| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number` |
+| Shared settings | `res://build_kit.config.json` | **yes** | `ios.preset`, `ios.build_number`, `ios.auth` (`"auto"` default, `"api_key"` or `"xcode"`: which credentials sign and upload; see Building to TestFlight) |
 | Credentials | repo `.env` (`res://.env`, else `res://../.env`) | **no** — gitignored | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH` |
 
 ```json
 {
 	"ios": {
 		"preset": "iOS",
-		"build_number": 1
+		"build_number": 1,
+		"auth": "auto"
 	}
 }
 ```

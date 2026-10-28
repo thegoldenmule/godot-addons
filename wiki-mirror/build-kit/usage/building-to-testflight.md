@@ -12,7 +12,7 @@ With preflight green, **▶ Build → TestFlight** is the whole loop. The build 
 3. **archive** — `xcodebuild archive` with `CODE_SIGNING_ALLOWED=NO`. The archive is deliberately unsigned; only the next stage signs.
 4. **upload** — `xcodebuild -exportArchive` with `method: app-store-connect`, `destination: upload`. This signs with a distribution certificate (cloud signing via your Xcode session, or an App Manager API key) and uploads straight to App Store Connect.
 
-The log's first line names the auth in use — `ASC API key <id>` or `Xcode session (teams: …)`. A signed-in session is preferred when one exists; the key flags are added only when there is none.
+The log's first line names the auth in use and the mode that chose it: `auth: ASC API key <id> [ios.auth api_key]` or `auth: Xcode session (teams: …) [ios.auth auto]`. `ios.auth` in `build_kit.config.json` (0.3.2+) picks the auth. `"auto"` is the default: it prefers a signed-in Xcode session and adds the key flags only when there is none. `"api_key"` always signs and uploads with the API key and never reads Xcode's account state; the build refuses to start without a usable key. `"xcode"` always uses the session and refuses to start with no signed-in team. Pick `"api_key"` for releases cut from a terminal or an agent shell, where the Xcode session can fail at export with `Failed to Use Accounts`. The preflight's `ios.auth` row shows what the next build will use.
 
 A successful upload increments `ios.build_number` in `build_kit.config.json`. **Build .ipa only** runs the identical pipeline with `destination: export` and leaves the signed `.ipa` in the build directory — it does not bump the build number.
 
@@ -36,7 +36,8 @@ The signatures cover, among others:
 
 - **No App Store Connect app record for this bundle id** — the one-time New App walkthrough.
 - **No distribution certificate in the keychain** — the Manage Certificates click-path.
-- **The API key can't manage signing (role too low)** — mint an App Manager key, or just stay signed into Xcode.
+- **The API key can't manage signing (role too low)** — mint an App Manager key, or (with `ios.auth` `"auto"`) stay signed into Xcode.
+- **The Xcode account session couldn't be used** (`Failed to Use Accounts`) — set `ios.auth` to `"api_key"` to sign with the API key instead.
 - **The managed profile predates your certificate** — build again; with working auth it regenerates.
 - **Godot rejected the export configuration** — Godot hides the reasons in headless runs (often an empty list). Refresh preflight: the known causes appear there with a Fix.
 
