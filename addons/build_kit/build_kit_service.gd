@@ -52,6 +52,8 @@ var _proc := {}                  # active Exec.spawn handle (+offset)
 var _upload := false
 var _build_number := 0           # CFBundleVersion of the running iOS build
 var _android_release := false    # release-APK export (finishes at disk, no install)
+var _android_aab := false        # AAB export for the Play Console (release, no upload)
+var _saved_export_format := -1   # preset export_format to restore after an AAB build (-1 = none)
 var _context := {}               # bundle_id / team_id for classify + guidance
 var _preset := {}                # parsed iOS preset (cached at build start)
 
@@ -270,6 +272,8 @@ static func resolve_ios_auth(mode: String, teams: PackedStringArray, has_key: bo
 
 ## Xcode's signed-in team ids (empty when nobody has signed in).
 static func xcode_teams() -> PackedStringArray:
+	if OS.get_name() != "macOS":  # Xcode (and `defaults`) exist only on macOS
+		return PackedStringArray()
 	return parse_teams(str(Exec.run(PackedStringArray(
 		["defaults", "read", "com.apple.dt.Xcode", "IDEProvisioningTeamByIdentifier"]))["output"]))
 
@@ -315,8 +319,15 @@ const RELEASE_KEYSTORE_ENV := [
 	["password", "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD"],
 ]
 
+## The user's home dir: $HOME, else %USERPROFILE% — HOME is unset on Windows,
+## where Android release builds run (the iOS tilde paths only run on macOS).
+static func home_dir() -> String:
+	var home := OS.get_environment("HOME")
+	return home if home != "" else OS.get_environment("USERPROFILE")
+
+
 ## {path, user, password} for the release key: environment, then repo .env ("" =
-## unset). A leading ~ in the path expands via HOME.
+## unset). A leading ~ in the path expands via home_dir().
 func android_release_keystore() -> Dictionary:
 	var env := {}
 	for env_path in ENV_PATHS:
@@ -330,7 +341,7 @@ func android_release_keystore() -> Dictionary:
 			value = str(env.get(pair[1], ""))
 		creds[pair[0]] = value
 	if str(creds["path"]).begins_with("~"):
-		creds["path"] = OS.get_environment("HOME") + str(creds["path"]).substr(1)
+		creds["path"] = home_dir() + str(creds["path"]).substr(1)
 	return creds
 
 
@@ -783,6 +794,37 @@ static func _bump_preset_version_code(section: String, path := "res://export_pre
 	return next
 
 
+## Writes the preset's export_format (0=APK, 1=AAB), returning the prior value,
+## or -1 if the preset can't be read/written. AAB export needs 1 (see
+## start_build_android_aab); the prior value is restored in _finish.
+static func _set_preset_export_format(section: String, value: int, path := "res://export_presets.cfg") -> int:
+	var cfg := ConfigFile.new()
+	if cfg.load(path) != OK:
+		return -1
+	var prior := int(cfg.get_value(section + ".options", "gradle_build/export_format", 0))
+	cfg.set_value(section + ".options", "gradle_build/export_format", value)
+	if cfg.save(path) != OK:
+		return -1
+	return prior
+
+
+static func preset_uses_gradle_build(section: String, path := "res://export_presets.cfg") -> bool:
+	var cfg := ConfigFile.new()
+	if cfg.load(path) != OK:
+		return false
+	return bool(cfg.get_value(section + ".options", "gradle_build/use_gradle_build", false))
+
+
+## "ok" / "stale" / "missing". Godot writes .build_version (= VERSION_FULL_CONFIG,
+## e.g. "4.7.1.stable") beside the build dir; a version mismatch makes Android
+## export refuse the template.
+static func android_build_template_state(ver: String, build_dir := "res://android/build",
+		marker := "res://android/.build_version") -> String:
+	if not DirAccess.dir_exists_absolute(build_dir) or not FileAccess.file_exists(marker):
+		return "missing"
+	return "ok" if FileAccess.get_file_as_string(marker).strip_edges() == ver else "stale"
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 func is_busy() -> bool:
@@ -901,10 +943,19 @@ func start_build_android(sdk_path: String, serial := "") -> Dictionary:
 	return ok({"stages": _stages.size() + 1})
 
 
+## The release-key creds as {ENV_NAME: value} for a stage's `env`: Godot reads
+## GODOT_ANDROID_KEYSTORE_RELEASE_* at export, and _spawn_with_env injects them
+## into the export child only (then restores), so the password never reaches the
+## echoed shell line or log — and a user's own such env vars survive the build.
+static func _release_keystore_env(ks: Dictionary) -> Dictionary:
+	var env := {}
+	for pair in RELEASE_KEYSTORE_ENV:
+		env[str(pair[1])] = str(ks[pair[0]])
+	return env
+
+
 ## Export a release-signed APK to disk — one stage, no install. The release key
-## comes from the .env; Godot reads it from GODOT_ANDROID_KEYSTORE_RELEASE_* at
-## export, so we set those on our own process and let the spawned export inherit
-## them (the password never reaches a shell line or the log).
+## comes from the .env (see _release_keystore_env).
 func start_build_android_release() -> Dictionary:
 	var guard := _android_build_preflight()
 	if not guard.is_empty():
@@ -914,9 +965,6 @@ func start_build_android_release() -> Dictionary:
 		return err("No release keystore configured. See the Release keystore preflight row — press Fix to generate one.")
 	if not FileAccess.file_exists(str(ks["path"])):
 		return err("The release keystore file is missing (%s). Re-generate or re-add it from the Release keystore row." % ks["path"])
-
-	for pair in RELEASE_KEYSTORE_ENV:
-		OS.set_environment(str(pair[1]), str(ks[pair[0]]))
 
 	var root := ProjectSettings.globalize_path("res://")
 	var paths := derive_paths(root, _preset["export_path"], "Android")
@@ -930,13 +978,54 @@ func start_build_android_release() -> Dictionary:
 				OS.get_executable_path(), "--headless", "--path", root,
 				"--export-release", _preset["name"], paths["out"],
 			])),
+			"env": _release_keystore_env(ks),
 		},
 	]
 	_next_stage(paths)
-	# Clear them now the spawned export has inherited them — otherwise
-	# android_release_keystore()'s env-first read shadows .env on the next build.
-	for pair in RELEASE_KEYSTORE_ENV:
-		OS.unset_environment(str(pair[1]))
+	return ok({"stages": _stages.size() + 1})
+
+
+## Export a signed .aab to disk (Play upload is manual — Godot has no Play API).
+## Godot checks the output extension against the preset's export_format, so we
+## force export_format=1 here and restore it in _finish. AAB is gated on Gradle
+## Build + the build template, so guard on both before touching anything.
+func start_build_android_aab() -> Dictionary:
+	var guard := _android_build_preflight()
+	if not guard.is_empty():
+		return guard
+	var ks := android_release_keystore()
+	if str(ks["path"]) == "" or str(ks["user"]) == "" or str(ks["password"]) == "":
+		return err("No release keystore configured. See the Release keystore preflight row — press Fix to generate one.")
+	if not FileAccess.file_exists(str(ks["path"])):
+		return err("The release keystore file is missing (%s). Re-generate or re-add it from the Release keystore row." % ks["path"])
+	if not preset_uses_gradle_build(str(_preset["section"])):
+		return err("Build → Play Console needs Use Gradle Build enabled. See the 'Gradle build (AAB)' preflight row — press Fix.")
+	var v: Dictionary = Engine.get_version_info()
+	if android_build_template_state(version_tag(v) + "." + str(v["status"])) != "ok":
+		return err("The Android build template isn't installed for this editor version. See the 'Android build template' preflight row.")
+
+	var prior := _set_preset_export_format(str(_preset["section"]), 1)
+	if prior < 0:
+		return err("Couldn't set export_format in the Android preset.")
+	_saved_export_format = prior
+
+	var root := ProjectSettings.globalize_path("res://")
+	var paths := derive_paths(root, _preset["export_path"], "Android")
+	var aab_out: String = paths["out"].get_basename() + ".aab"
+	_context = {}
+	_active_platform = "android"
+	_android_aab = true
+	_stages = [
+		{
+			"name": "export",
+			"shell": Exec.command_line(PackedStringArray([
+				OS.get_executable_path(), "--headless", "--path", root,
+				"--export-release", _preset["name"], aab_out,
+			])),
+			"env": _release_keystore_env(ks),
+		},
+	]
+	_next_stage(paths)
 	return ok({"stages": _stages.size() + 1})
 
 
@@ -987,6 +1076,21 @@ func _next_stage(paths: Dictionary = {}) -> void:
 			})
 		elif _active_platform == "itch":
 			_finish(_itch_success_result())
+		elif _android_aab:
+			if _bump_preset_version_code(str(_preset["section"])) < 0:
+				push_warning("build_kit: couldn't bump version/code in the preset")
+			var aab: String = paths["out"].get_basename() + ".aab"
+			var guidance := "Signed AAB: %s\n" % aab
+			# Only the generate Fix writes the cert; an adopted keystore has none.
+			if FileAccess.file_exists(upload_cert_path()):
+				guidance += "Upload cert (Play App Signing): %s\n" % upload_cert_path()
+			guidance += "Upload the .aab in the Play Console."
+			_finish({"ok": true, "title": "AAB exported → upload to Play Console",
+				"guidance": guidance,
+				"links": [
+					{"label": "Open folder", "url": paths["dir"]},
+					{"label": "Play Console", "url": "https://play.google.com/console"},
+				]})
 		elif _android_release:
 			if _bump_preset_version_code(str(_preset["section"])) < 0:
 				push_warning("build_kit: couldn't bump version/code in the preset")
@@ -1107,6 +1211,13 @@ func _finish(result: Dictionary) -> void:
 	_stage = ""
 	_stage_def = {}
 	_active_platform = ""
+	# Restore the preset's export_format the AAB build flipped to 1 (the spawned
+	# export reads it from disk mid-run, so it can't be restored right after spawn).
+	if _android_aab and _saved_export_format >= 0:
+		if _set_preset_export_format(str(_preset["section"]), _saved_export_format) < 0:
+			push_warning("build_kit: couldn't restore export_format in the preset")
+	_saved_export_format = -1
+	_android_aab = false
 	_android_release = false
 	_proc = {}
 	_itch_build = {}
@@ -2030,6 +2141,8 @@ func refresh_preflight() -> void:
 	rows.append(_check_devices())
 	rows.append(_check_android_templates())
 	rows.append(_check_android_preset())
+	rows.append(_check_android_gradle_build())
+	rows.append(_check_android_build_template())
 	var rk := android_release_keystore()
 	rows.append(_check_android_release_keystore(str(rk["path"]), str(rk["user"]), str(rk["password"])))
 	rows.append_array(_itch_rows())
@@ -2555,6 +2668,53 @@ func _fix_android_preset() -> Dictionary:
 	return ok({"message": ", ".join(msgs) if not msgs.is_empty() else "nothing to fix"})
 
 
+func _check_android_gradle_build() -> Dictionary:
+	var preset := load_preset("Android")
+	if preset.is_empty():
+		return _row("android.gradle_build", "Gradle build (AAB)", "warn", "",
+			"Needed only for Build → Play Console. Create an Android export preset first (see the Android export preset row).")
+	if preset_uses_gradle_build(str(preset["section"])):
+		return _row("android.gradle_build", "Gradle build (AAB)", "ok", "Use Gradle Build is on",
+			"Heads up: Build → Device (debug) now routes through Gradle too — slower, and it needs the build template. Turn it back off in Project → Export → Android for the fast prebuilt-template path.")
+	return _row("android.gradle_build", "Gradle build (AAB)", "warn", "Use Gradle Build is off",
+		"Needed only for Build → Play Console (AAB).\n1. Press Fix — turns on Use Gradle Build in the preset.\n⚠ This also routes DEBUG builds through Gradle, so the Android build template becomes required for Build → Device too (see the Android build template row).\n2. Refresh preflight.",
+		true)
+
+
+func _fix_android_gradle_build() -> Dictionary:
+	var preset := load_preset("Android")
+	if preset.is_empty():
+		return err("No Android preset to fix — create one first.")
+	var cfg := ConfigFile.new()
+	if cfg.load("res://export_presets.cfg") != OK:
+		return err("Cannot parse export_presets.cfg.")
+	cfg.set_value(str(preset["section"]) + ".options", "gradle_build/use_gradle_build", true)
+	if cfg.save("res://export_presets.cfg") != OK:
+		return err("Cannot write export_presets.cfg.")
+	mark_dirty()
+	refresh_preflight()
+	return ok({"message": "Use Gradle Build enabled"})
+
+
+## Not auto-fixable: Godot only installs the template as a side effect of a full
+## --export-debug/--export-release run (not standalone), so we point at the
+## editor's own one-click menu instead of spawning an export.
+func _check_android_build_template() -> Dictionary:
+	var v: Dictionary = Engine.get_version_info()
+	var ver := version_tag(v) + "." + str(v["status"])
+	match android_build_template_state(ver):
+		"ok":
+			return _row("android.build_template", "Android build template", "ok", ver)
+		"stale":
+			var installed := FileAccess.get_file_as_string("res://android/.build_version").strip_edges()
+			return _row("android.build_template", "Android build template", "warn",
+				"installed %s, editor is %s" % [installed, ver],
+				"The installed build template is from a different Godot version — Android export will refuse it.\n1. Editor → Project → Install Android Build Template… to reinstall for %s.\n2. Refresh preflight." % ver)
+		_:
+			return _row("android.build_template", "Android build template", "warn", "not installed",
+				"Required once Use Gradle Build is on (always for Build → Play Console).\n1. Editor → Project → Install Android Build Template…\n2. Refresh preflight.")
+
+
 ## `extra` = optional helper flags (e.g. --app-version for build-numbers).
 func _spawn_asc(command: String, bundle_id: String, log_name: String,
 		extra: PackedStringArray = PackedStringArray()) -> Dictionary:
@@ -2868,6 +3028,16 @@ static func keytool_exportcert_args(keytool: String, keystore_path: String, alia
 	])
 
 
+## keytool -list on one alias: non-zero exit = wrong password or missing alias.
+static func keytool_list_args(keytool: String, keystore_path: String, alias: String, password: String) -> PackedStringArray:
+	return PackedStringArray([
+		keytool, "-list",
+		"-keystore", keystore_path,
+		"-alias", alias,
+		"-storepass", password,
+	])
+
+
 ## The android.release_keystore Fix: mint a keystore + save its creds to .env.
 ## Synchronous — keytool is a bounded local call (the dock warns before the brief
 ## freeze); refuses an existing file so a real signing key is never clobbered.
@@ -2893,7 +3063,11 @@ func _fix_release_keystore(jdk_path: String, keystore_path := "") -> Dictionary:
 		"GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD": password,
 	})
 	if env_file == "":
-		return err("Keystore created at %s, but %s could not be written." % [keystore_path, env_write_path()])
+		# The password only lived in memory, so a keystore we can't record creds
+		# for is unusable — discard it, else the "already exists" guard above
+		# wedges every retry.
+		DirAccess.remove_absolute(keystore_path)
+		return err("Couldn't write %s, so the new keystore was discarded (its password was never saved). Fix the .env location and press Fix again." % env_write_path())
 	var pem := upload_cert_path()
 	var cert := Exec.run(keytool_exportcert_args(keytool, keystore_path, alias, password, pem))
 	refresh_preflight()
@@ -2903,6 +3077,39 @@ func _fix_release_keystore(jdk_path: String, keystore_path := "") -> Dictionary:
 	else:
 		msg += " (Upload-certificate export failed — only needed for Play registration; re-run then.)"
 	return ok({"message": msg})
+
+
+## Adopt a user-supplied release keystore: validate the alias+password with
+## keytool, copy it out of the repo (binary — verbatim, never a text copy), and
+## record the creds to .env. Synchronous — keytool -list is a bounded local call.
+func adopt_release_keystore(keystore_path: String, alias: String, password: String, jdk_path: String) -> Dictionary:
+	if jdk_path == "":
+		return err("Configure the Java SDK path first — see the Java SDK preflight row.")
+	if not FileAccess.file_exists(keystore_path):
+		return err("File not found: " + keystore_path)
+	alias = alias.strip_edges()
+	if alias == "":
+		return err("Enter the key alias (the name the key was created under).")
+	if password == "":
+		return err("Enter the keystore password.")
+	var keytool := resolve_keytool_path(jdk_path)
+	var check := Exec.run(keytool_list_args(keytool, keystore_path, alias, password))
+	if int(check["code"]) != 0:
+		return err("keytool couldn't open the keystore — check the password and that alias '%s' exists: %s" % [alias, str(check["output"]).strip_edges().left(300)])
+	var dest := release_keystore_dir().path_join(keystore_path.get_file())
+	if dest != keystore_path:
+		DirAccess.make_dir_recursive_absolute(release_keystore_dir())
+		if DirAccess.copy_absolute(keystore_path, dest) != OK:
+			return err("Cannot copy the keystore to " + dest)
+	var env_file := write_env_vars({
+		"GODOT_ANDROID_KEYSTORE_RELEASE_PATH": dest,
+		"GODOT_ANDROID_KEYSTORE_RELEASE_USER": alias,
+		"GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD": password,
+	})
+	if env_file == "":
+		return err("Keystore copied to %s, but %s could not be written." % [dest, env_write_path()])
+	refresh_preflight()
+	return ok({"message": "Release keystore '%s' added from %s; credentials saved to %s." % [alias, keystore_path.get_file(), env_file]})
 
 
 # ── Fixes ─────────────────────────────────────────────────────────────────────
@@ -2922,6 +3129,8 @@ func apply_fix(id: String, opts: Dictionary = {}) -> Dictionary:
 			return _fix_bundle_id()
 		"android.preset":
 			return _fix_android_preset()
+		"android.gradle_build":
+			return _fix_android_gradle_build()
 		"itch.butler":
 			return _fix_butler()
 		"itch.templates":

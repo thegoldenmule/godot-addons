@@ -107,6 +107,15 @@ func _initialize() -> void:
 	var neutral_templates := Classify.classify("No export template found for platform \"Android\".", {}, "android")
 	_check("classify unscoped rule matches android", neutral_templates["id"] == "no_export_templates", str(neutral_templates))
 	_check("classify no_export_templates wording is platform-neutral", not str(neutral_templates["guidance"]).contains("iOS"), str(neutral_templates))
+	# AAB / Gradle failure strings (verified against the 4.7.1 binary)
+	var aab_gate := Classify.classify("ERROR: \"Export AAB\" is only valid when \"Use Gradle Build\" is enabled.", {}, "android")
+	_check("classify aab needs gradle build", aab_gate["id"] == "aab_needs_gradle_build", str(aab_gate))
+	var aab_gate_ios := Classify.classify("\"Export AAB\" is only valid when \"Use Gradle Build\" is enabled.", {}, "ios")
+	_check("classify aab/gradle rule is android-only", aab_gate_ios["id"] == "unknown", str(aab_gate_ios))
+	var bt_missing_log := Classify.classify("ERROR: Android build template not installed in the project. Install it from the Project menu.", {}, "android")
+	_check("classify android build template missing", bt_missing_log["id"] == "android_build_template_missing", str(bt_missing_log))
+	var gradle_fail := Classify.classify("Building of Android project failed, check output for the error: Copying ...", {}, "android")
+	_check("classify gradle build failed", gradle_fail["id"] == "gradle_build_failed", str(gradle_fail))
 
 	# preset parsing
 	var preset := ServiceT.parse_preset_text(PRESET_FIXTURE, "iOS")
@@ -145,6 +154,48 @@ func _initialize() -> void:
 	_check("bump defaults unset to 1 then +1", ServiceT._bump_preset_version_code("preset.0", vc_path2) == 2)
 	_check("bump missing file returns -1", ServiceT._bump_preset_version_code("preset.0", "user://nope_vc.cfg") == -1)
 
+	# gradle build detection — the AAB prerequisite, read from the preset's options
+	var gb_path := "user://verify_build_kit_gb.cfg"
+	var gbf := FileAccess.open(gb_path, FileAccess.WRITE)
+	gbf.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\n[preset.0.options]\ngradle_build/use_gradle_build=true\n")
+	gbf.close()
+	_check("gradle build on detected", ServiceT.preset_uses_gradle_build("preset.0", gb_path))
+	var gb_path2 := "user://verify_build_kit_gb2.cfg"
+	var gbf2 := FileAccess.open(gb_path2, FileAccess.WRITE)
+	gbf2.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\n[preset.0.options]\ngradle_build/use_gradle_build=false\n")
+	gbf2.close()
+	_check("gradle build off detected", not ServiceT.preset_uses_gradle_build("preset.0", gb_path2))
+	var gb_path3 := "user://verify_build_kit_gb3.cfg"
+	var gbf3 := FileAccess.open(gb_path3, FileAccess.WRITE)
+	gbf3.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\n[preset.0.options]\npackage/name=\"\"\n")
+	gbf3.close()
+	_check("gradle build unset defaults off", not ServiceT.preset_uses_gradle_build("preset.0", gb_path3))
+	_check("gradle build missing file defaults off", not ServiceT.preset_uses_gradle_build("preset.0", "user://nope_gb.cfg"))
+
+	# export_format set/restore — AAB export forces 1 and _finish restores the prior value
+	var ef_path := "user://verify_build_kit_ef.cfg"
+	var eff := FileAccess.open(ef_path, FileAccess.WRITE)
+	eff.store_string("[preset.0]\nname=\"Android\"\nplatform=\"Android\"\n[preset.0.options]\ngradle_build/export_format=0\n")
+	eff.close()
+	_check("set export_format returns prior 0", ServiceT._set_preset_export_format("preset.0", 1, ef_path) == 0)
+	var ef_read := ConfigFile.new()
+	ef_read.load(ef_path)
+	_check("export_format written as 1", int(ef_read.get_value("preset.0.options", "gradle_build/export_format", -1)) == 1)
+	_check("set export_format round-trips prior 1", ServiceT._set_preset_export_format("preset.0", 0, ef_path) == 1)
+	_check("set export_format missing file returns -1", ServiceT._set_preset_export_format("preset.0", 1, "user://nope_ef.cfg") == -1)
+
+	# android build template state — presence + version-match of the .build_version marker
+	var bt_dir := "user://verify_build_kit_bt"
+	var bt_marker := bt_dir.path_join(".build_version")
+	DirAccess.make_dir_recursive_absolute(bt_dir)
+	_check("build template missing when no marker", ServiceT.android_build_template_state("4.7.1.stable", bt_dir, "user://nope_bt_marker") == "missing")
+	var btf := FileAccess.open(bt_marker, FileAccess.WRITE)
+	btf.store_string("4.7.1.stable\n")  # trailing newline exercises strip_edges
+	btf.close()
+	_check("build template ok when marker matches", ServiceT.android_build_template_state("4.7.1.stable", bt_dir, bt_marker) == "ok")
+	_check("build template stale when marker differs", ServiceT.android_build_template_state("4.8.0.stable", bt_dir, bt_marker) == "stale")
+	_check("build template missing when no build dir", ServiceT.android_build_template_state("4.7.1.stable", "user://nope_bt_dir", bt_marker) == "missing")
+
 	# derived paths
 	var paths := ServiceT.derive_paths("/proj/game/", "../build/ios/Game.ipa", "iOS")
 	_check("paths out", paths["out"] == "/proj/build/ios/Game.ipa", str(paths))
@@ -158,6 +209,11 @@ func _initialize() -> void:
 		not android_paths.has("xcodeproj") and not android_paths.has("archive")
 		and not android_paths.has("info_plist") and not android_paths.has("options_plist"),
 		str(android_paths))
+	# AAB output path = the APK export path with its extension swapped (what
+	# start_build_android_aab passes to --export-release)
+	_check("aab output path swaps extension",
+		android_paths["out"].get_basename() + ".aab" == "/proj/build/android/game.aab",
+		android_paths["out"])
 
 	# apksigner silent-failure detection
 	_check("apksigner missing detected", ServiceT.apksigner_warning_signature(
@@ -327,6 +383,25 @@ func _initialize() -> void:
 	_check("release keystore fix left the existing file intact",
 		FileAccess.open(existing_ks, FileAccess.READ).get_as_text() == "not empty")
 	rk_fix_svc.free()
+
+	# release keystore ingestion (adopt): guard branches only; the happy path
+	# would shell out to keytool.
+	var adopt_svc: Node = ServiceT.new()
+	_check("adopt needs a jdk",
+		str(adopt_svc.adopt_release_keystore("/any.keystore", "upload", "pw", "").get("error", "")).contains("Java SDK"))
+	_check("adopt rejects a missing file",
+		str(adopt_svc.adopt_release_keystore("/no/such.keystore", "upload", "pw", "/any/jdk").get("error", "")).contains("File not found"))
+	var adopt_ks := OS.get_cache_dir().path_join("build_kit_verify").path_join("adopt.keystore")
+	DirAccess.make_dir_recursive_absolute(adopt_ks.get_base_dir())
+	var akf := FileAccess.open(adopt_ks, FileAccess.WRITE)
+	if akf != null:
+		akf.store_string("ks")
+		akf.close()
+	_check("adopt requires an alias",
+		str(adopt_svc.adopt_release_keystore(adopt_ks, "  ", "pw", "/any/jdk").get("error", "")).contains("alias"))
+	_check("adopt requires a password",
+		str(adopt_svc.adopt_release_keystore(adopt_ks, "upload", "", "/any/jdk").get("error", "")).contains("password"))
+	adopt_svc.free()
 
 	# Read-only (unlike Fix), so safe to exercise against the real repo's export_presets.cfg.
 	var svc5: Node = ServiceT.new()
@@ -510,6 +585,11 @@ func _initialize() -> void:
 	var cert := ServiceT.keytool_exportcert_args("keytool", "/ks.keystore", "upload", "SECRET", "/out.pem")
 	_check("exportcert rfc to pem",
 		cert.has("-exportcert") and cert.has("-rfc") and cert[cert.find("-file") + 1] == "/out.pem", str(cert))
+	var listargs := ServiceT.keytool_list_args("keytool", "/ks.keystore", "upload", "SECRET")
+	_check("keytool_list_args targets the alias with the password",
+		listargs.has("-list") and listargs[listargs.find("-keystore") + 1] == "/ks.keystore"
+		and listargs[listargs.find("-alias") + 1] == "upload"
+		and listargs[listargs.find("-storepass") + 1] == "SECRET", str(listargs))
 
 	# android sdk/jdk: only the deterministic branch (a path that exists) is
 	# pinned exactly; fixable branches assert fix_value self-consistently
@@ -1300,22 +1380,22 @@ out['bad_versions'] = [rejects(h.check_app_version, v) for v in ['$(MARKETING_VE
 out['good_versions'] = [rejects(h.check_app_version, v) for v in ['', '1', '1.3', '1.3.0']]
 out['bad_builds'] = [rejects(h.check_build_number, v) for v in ['', '$(CURRENT_PROJECT_VERSION)', 'seven']]
 FIX = {'data': [
-    {'type': 'builds', 'id': 'b2', 'attributes': {'version': '7', 'processingState': 'PROCESSING', 'uploadedDate': '2026-10-09T10:05:00-07:00'}},
-    {'type': 'builds', 'id': 'b1', 'attributes': {'version': '6', 'processingState': 'VALID', 'uploadedDate': '2026-10-08T09:00:00-07:00'}}],
-    'links': {'self': 'https://api.appstoreconnect.apple.com/v1/builds'}}
+	{'type': 'builds', 'id': 'b2', 'attributes': {'version': '7', 'processingState': 'PROCESSING', 'uploadedDate': '2026-10-09T10:05:00-07:00'}},
+	{'type': 'builds', 'id': 'b1', 'attributes': {'version': '6', 'processingState': 'VALID', 'uploadedDate': '2026-10-08T09:00:00-07:00'}}],
+	'links': {'self': 'https://api.appstoreconnect.apple.com/v1/builds'}}
 out['parsed'] = h.parse_builds(FIX)
 calls = []
 def fake_get(token, path):
     calls.append(path)
-    if path.startswith('/v1/apps?'):
-        return {'data': [{'type': 'apps', 'id': 'APP', 'attributes': {'bundleId': 'com.example.game', 'name': 'Game'}}]}
-    if 'filter[version]=7' in path:
-        return {'data': FIX['data'][:1]}
+	if path.startswith('/v1/apps?'):
+		return {'data': [{'type': 'apps', 'id': 'APP', 'attributes': {'bundleId': 'com.example.game', 'name': 'Game'}}]}
+	if 'filter[version]=7' in path:
+		return {'data': FIX['data'][:1]}
     return FIX
 h.make_token = lambda *a: 'token'
 h.get = fake_get
 def run(argv):
-    sys.argv = ['asc_helper.py', '--key-path', 'k', '--key-id', 'K', '--issuer-id', 'I'] + argv
+	sys.argv = ['asc_helper.py', '--key-path', 'k', '--key-id', 'K', '--issuer-id', 'I'] + argv
     buf = io.StringIO()
     code = 0
     with contextlib.redirect_stdout(buf):

@@ -1,7 +1,7 @@
 # Build Kit
 
 One-button builds from inside the Godot editor: **iOS → TestFlight**,
-**Android → Device** and **itch.io** (Web/desktop channels via `butler`). An
+**Android → Device / Play Console** and **itch.io** (Web/desktop channels via `butler`). An
 [`editor_tool_kit`](../editor_tool_kit/README.md) tool: a headless-testable
 `BuildKitService` + a bottom-panel dock, one tab per target.
 
@@ -180,9 +180,11 @@ blank by default), the debug keystore Godot generates and signs debug builds
 with (detect-only — no Fix; the actionable row is the JDK one, since that's
 what Godot's own keystore generation needs), export templates (shared with
 iOS and itch.io — one download, a row on each tab), the ETC2/ASTC project setting Android export
-requires, the release keystore for release-APK builds (read from your `.env`;
-**Fix** generates one with a random upload-key password), and any
-`adb`-connected device.
+requires, the release keystore for release-APK and AAB builds (read from your
+`.env`; **Fix** generates one with a random upload-key password, or add an
+existing `.keystore`/`.jks` via the row's drop/browse form), the two **Play
+Console** prerequisites — *Use Gradle Build* and the installed *Android build
+template* — and any `adb`-connected device.
 
 **Build → Device** — two stages, both detached and cancellable:
 
@@ -205,17 +207,23 @@ The APK stays on disk — there's no install step. On success the preset's
 mints a keystore (random password → `.env`) plus an upload certificate for
 one-time Play App Signing registration.
 
+**Build → Play Console** — one stage: `godot --headless --export-release
+<preset> <out.aab>`, producing a signed Android App Bundle for Google Play.
+AAB output needs *Use Gradle Build* on and the *Android build template*
+installed (both have preflight rows); Build Kit flips the preset's
+`export_format` to AAB for the export and restores it afterward, so your APK
+and Build → Device paths are unaffected. Signing and the `version/code`
+auto-bump work exactly as the release APK. The `.aab` and the `.pem` upload
+certificate stay on disk — **Play upload is manual**: Godot has no Play
+Developer API, and a first release needs the console's
+listing/Data-Safety/content-rating setup by hand anyway. The finish message
+links the Play Console and points at the upload cert.
+
 Known Android failures (an install signed with a different key, an
 unauthorized or missing device, low storage, a missing SDK/JDK path, a
-misconfigured release keystore, …) get the same plain-language `classify.gd`
-treatment as iOS's, scoped so an Android failure never gets iOS's guidance
-text or vice versa.
-
-**Not yet built** — visible-but-disabled buttons on the Android tab signal
-the intent without hiding it: **Build → Play Console** (AAB upload) needs
-"Use Gradle Build" turned on, which this pass deliberately doesn't do; **Add
-release keystore…** (ingesting an *existing* keystore) has no UI yet — for
-now the Release keystore row's **Fix** generates a fresh one.
+misconfigured release keystore, a Gradle build failure or a missing build
+template, …) get the same plain-language `classify.gd` treatment as iOS's,
+scoped so an Android failure never gets iOS's guidance text or vice versa.
 
 ### itch.io
 
@@ -305,6 +313,12 @@ preset's signing fields stay **empty** and no secret ever lands in
    and accept the RSA fingerprint prompt on first connect — the Device row
    goes green once `adb` reports it authorized. Godot generates its own debug
    keystore automatically; there's nothing to set up for that.
+4. For release builds, add a release keystore — the **Release keystore**
+   preflight row's **Fix** generates one, or drop an existing `.keystore`/`.jks`
+   on that row. For **Build → Play Console** (AAB) also turn on *Use Gradle
+   Build* (its preflight **Fix**) and install the Android build template
+   (Editor → Project → Install Android Build Template…); both have preflight
+   rows that flag what's missing.
 
 ### itch.io
 

@@ -150,6 +150,27 @@ static func rules() -> Array:
 			"platforms": ["android"],
 		},
 		{
+			"id": "aab_needs_gradle_build",
+			"patterns": ["\"Export AAB\" is only valid when \"Use Gradle Build\" is enabled"],
+			"title": "Export AAB needs Use Gradle Build enabled",
+			"guidance": "See the 'Gradle build (AAB)' preflight row — press Fix to turn on Use Gradle Build, then build again.",
+			"platforms": ["android"],
+		},
+		{
+			"id": "android_build_template_missing",
+			"patterns": ["Android build template not installed in the project"],
+			"title": "Android build template not installed",
+			"guidance": "An AAB build needs the build template in the project.\n1. Editor → Project → Install Android Build Template…\n2. Refresh preflight, then build again.",
+			"platforms": ["android"],
+		},
+		{
+			"id": "gradle_build_failed",
+			"patterns": ["Building of Android project failed"],
+			"title": "Gradle build of the Android project failed",
+			"guidance": "The Gradle build failed — the actual error is in the log above (look for the first 'FAILURE:' or 'error:' line). Common causes: a missing SDK build-tools/NDK component (open Android Studio's SDK Manager), or an incompatible Android plugin.",
+			"platforms": ["android"],
+		},
+		{
 			"id": "apksigner_missing",
 			"patterns": ["'apksigner' could not be found", "'apksigner' returned with error", "'apksigner' verification of APK failed", "All 'apksigner' tools located in Android SDK 'build-tools' directory failed"],
 			"title": "APK is unsigned — apksigner missing from the SDK",
